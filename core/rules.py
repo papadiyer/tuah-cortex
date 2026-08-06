@@ -25,6 +25,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_RULES_PATH = os.path.join(REPO_ROOT, "config", "cortex_rules.json")
+DEFAULT_IDENTITY_PATH = os.path.join(REPO_ROOT, "config", "identity.json")
+
+# Runtime version reported by /v1/health and the MCP surface (RC1 / v0.4).
+SERVICE_VERSION = "0.4.0"
 
 _TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
 
@@ -59,6 +63,35 @@ def load_rules(path: Optional[str] = None, use_cache: bool = True) -> dict:
 def repo_path(*parts: str) -> str:
     """Resolve a path relative to the repository root."""
     return os.path.join(REPO_ROOT, *parts)
+
+
+_identity_cache: Dict[str, dict] = {}
+
+
+def load_identity(path: Optional[str] = None, use_cache: bool = True) -> dict:
+    """Load Tier 0 identity/authority config (MEMORY_SCHEMA.md section 2).
+
+    Tier 0 must never depend on cosine recall, so it is read from stable config.
+    A missing file is not fatal - the runtime degrades to a minimal built-in
+    identity and reports the gap through ``warnings`` rather than inventing
+    authority rules.
+    """
+    resolved = os.path.abspath(path or DEFAULT_IDENTITY_PATH)
+    if use_cache and resolved in _identity_cache:
+        return _identity_cache[resolved]
+    if not os.path.exists(resolved):
+        return {}
+    try:
+        with open(resolved, "r", encoding="utf-8") as handle:
+            identity = json.load(handle)
+    except ValueError:
+        # Malformed identity config: treat as absent, never guess.
+        return {}
+    if not isinstance(identity, dict):
+        return {}
+    if use_cache:
+        _identity_cache[resolved] = identity
+    return identity
 
 
 def tokenize(text: str) -> List[str]:

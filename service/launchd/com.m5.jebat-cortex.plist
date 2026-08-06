@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Jebat-Cortex cognitive runtime (RC1 / v0.4) - macOS launchd agent.
+
+  Install (per-user LaunchAgent, no sudo):
+    1. Edit CORTEX_HOME and ProgramArguments[0] below if your paths differ.
+    2. cp service/launchd/com.m5.jebat-cortex.plist ~/Library/LaunchAgents/
+    3. launchctl load  ~/Library/LaunchAgents/com.m5.jebat-cortex.plist
+       launchctl start com.m5.jebat-cortex
+    4. Verify: curl -s http://127.0.0.1:8765/v1/health
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.m5.jebat-cortex.plist
+
+  Notes:
+    * The API binds 127.0.0.1 only; this agent never exposes a public port.
+    * CORTEX_ADMIN_TOKEN is intentionally NOT set here - putting a secret in a
+      plist would check it into the repo. Export it in your login shell or use
+      a keychain helper if you need the admin routes.
+    * This runs the API. Load com.m5.jebat-cortex-worker.plist for the ingest
+      worker, or run `python3 -m workers.ingest_worker` alongside it.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.m5.jebat-cortex</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>-m</string>
+        <string>cli.cortex_cli</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8765</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-api.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-api.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

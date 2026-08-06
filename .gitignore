@@ -2,7 +2,13 @@
 __pycache__/
 *.pyc
 *.db
+# SQLite WAL sidecars (the durable queue runs in WAL mode)
+*.db-wal
+*.db-shm
 .DS_Store
+
+# Service runtime logs
+logs/*.log
 
 # Generated from the real Hermes corpus - contains private conversation text.
 data/hermes_export.jsonl

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Jebat-Cortex ingest worker - macOS launchd agent.
+
+  The API only enqueues events; this process turns them into curated memory.
+  It resets any 'processing' rows left by a crash back to 'queued' on boot, so
+  no event is stranded.
+
+  Install:
+    cp service/launchd/com.m5.jebat-cortex-worker.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.m5.jebat-cortex-worker.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.m5.jebat-cortex-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>-m</string>
+        <string>workers.ingest_worker</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-worker.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-worker.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

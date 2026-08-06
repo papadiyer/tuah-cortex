@@ -43,6 +43,41 @@ CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 """
 
+# Additive provenance/status columns (MEMORY_SCHEMA.md section 1 / section 5).
+# `meta` already exists on both tables; status/project are promoted to columns
+# so retrieval can filter without parsing every JSON blob.
+_ADDITIVE_EDGE_COLUMNS = (
+    ("status", "TEXT"),
+    ("source_type", "TEXT"),
+    ("project", "TEXT"),
+)
+_ADDITIVE_NODE_COLUMNS = (
+    ("status", "TEXT"),
+    ("project", "TEXT"),
+)
+
+# Replaced/rejected experience stays queryable for provenance but is excluded
+# from default retrieval (MEMORY_SCHEMA.md section 3).
+_EXCLUDED_BY_DEFAULT = ("superseded", "rejected")
+
+
+def _ensure_columns(conn: "sqlite3.Connection") -> None:
+    """Add additive columns to existing nodes/edges tables if absent.
+
+    Databases created before provenance tagging are migrated in place rather
+    than rejected. Pre-existing rows carry NULL status and are treated as
+    'approved' by retrieval, since they predate the status model.
+    """
+    changed = False
+    for table, columns in (("edges", _ADDITIVE_EDGE_COLUMNS), ("nodes", _ADDITIVE_NODE_COLUMNS)):
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+        for name, coltype in columns:
+            if name not in existing:
+                conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, coltype))
+                changed = True
+    if changed:
+        conn.commit()
+
 # Bounds for the ripgrep fallback so a broad keyword cannot flood the caller.
 _RG_MAX_COUNT = 20
 _RG_TIMEOUT_SEC = 10
@@ -62,9 +97,13 @@ class GraphStore:
         self.db_path = db_path
         if db_path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False: see the note in core/vector_store.py - the
+        # threaded HTTP server uses one store from many request threads, and
+        # api.app serialises those calls with a lock.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        _ensure_columns(self.conn)
         self.conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
@@ -88,9 +127,13 @@ class GraphStore:
         label = (label or "").strip()
         if not label:
             return None
+        payload = dict(meta or {})
+        status = payload.pop("status", None) or "approved"
+        project = payload.pop("project", None)
         self.conn.execute(
-            "INSERT OR IGNORE INTO nodes (label, kind, meta, ts) VALUES (?, ?, ?, ?)",
-            (label, kind, json.dumps(meta or {}, sort_keys=True), _utc_now()),
+            "INSERT OR IGNORE INTO nodes (label, kind, meta, ts, status, project)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (label, kind, json.dumps(payload, sort_keys=True), _utc_now(), status, project),
         )
         self.conn.commit()
         row = self.conn.execute(
@@ -112,14 +155,32 @@ class GraphStore:
         rel = (rel or "").strip()
         if not rel:
             return None
-        src = self.add_node(src_label, src_kind)
-        dst = self.add_node(dst_label, dst_kind)
+        payload = dict(meta or {})
+        status = payload.pop("status", None) or "approved"
+        source_type = payload.pop("source_type", None) or "conversation"
+        project = payload.pop("project", None)
+        # Endpoint nodes inherit the edge's project scope so a project-filtered
+        # graph query can reach them; status stays per-row.
+        node_meta = {"project": project} if project else None
+        src = self.add_node(src_label, src_kind, meta=node_meta)
+        dst = self.add_node(dst_label, dst_kind, meta=node_meta)
         if src is None or dst is None:
             return None
         self.conn.execute(
-            "INSERT OR IGNORE INTO edges (src, dst, rel, source, ts, meta)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (src, dst, rel, source, _utc_now(), json.dumps(meta or {}, sort_keys=True)),
+            "INSERT OR IGNORE INTO edges"
+            " (src, dst, rel, source, ts, meta, status, source_type, project)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                src,
+                dst,
+                rel,
+                source,
+                _utc_now(),
+                json.dumps(payload, sort_keys=True),
+                status,
+                source_type,
+                project,
+            ),
         )
         self.conn.commit()
         row = self.conn.execute(
@@ -148,8 +209,74 @@ class GraphStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def query(self, subject_or_keyword: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Rank edges by keyword overlap with subject/relation/object labels."""
+    def related(
+        self,
+        entity: str,
+        top_k: int = 10,
+        project: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Graph neighbours of ``entity`` (MCP cortex.get_related_experiences).
+
+        Matches the label exactly or as a substring, so "vector_store" finds
+        "core/vector_store.py". Excludes superseded/rejected edges.
+        """
+        entity = (entity or "").strip()
+        if not entity:
+            return []
+        # Escape LIKE metacharacters so entity='%' searches for a literal
+        # percent sign instead of matching every edge in the graph.
+        literal = (
+            entity.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        like = "%%%s%%" % literal
+        sql = (
+            "SELECT e.id AS id, s.label AS src, e.rel AS rel, d.label AS dst,"
+            "       e.source AS source, e.ts AS ts, e.status AS status,"
+            "       e.source_type AS source_type, e.project AS project"
+            " FROM edges e"
+            " JOIN nodes s ON s.id = e.src"
+            " JOIN nodes d ON d.id = e.dst"
+            " WHERE COALESCE(e.status, 'approved') NOT IN (?, ?)"
+            "   AND (LOWER(s.label) LIKE ? ESCAPE '\\' OR LOWER(d.label) LIKE ? ESCAPE '\\')"
+        )
+        params: List[Any] = list(_EXCLUDED_BY_DEFAULT) + [like, like]
+        if project:
+            sql += " AND COALESCE(e.project, '') = ?"
+            params.append(project)
+        sql += " ORDER BY e.id"
+
+        out: List[Dict[str, Any]] = []
+        for row in self.conn.execute(sql, params).fetchall():
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "src": row["src"],
+                    "rel": row["rel"],
+                    "dst": row["dst"],
+                    "text": "%s %s %s" % (row["src"], row["rel"], row["dst"]),
+                    "source": row["source"],
+                    "ts": row["ts"],
+                    "type": "experience",
+                    "status": row["status"] or "approved",
+                    "source_type": row["source_type"] or "conversation",
+                    "project": row["project"],
+                }
+            )
+            if len(out) >= max(0, int(top_k)):
+                break
+        return out
+
+    def query(
+        self,
+        subject_or_keyword: str,
+        top_k: Optional[int] = None,
+        project: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Rank edges by keyword overlap with subject/relation/object labels.
+
+        ``project`` (optional, additive) scopes the search to one project's
+        experience; superseded/rejected edges are always excluded.
+        """
         if top_k is None:
             top_k = int(self.rules["retrieval"]["graph_top_k"])
         probe_tokens = set(tokenize(subject_or_keyword))
@@ -157,13 +284,22 @@ class GraphStore:
             return []
 
         results: List[Dict[str, Any]] = []
-        rows = self.conn.execute(
+        sql = (
             "SELECT e.id AS id, s.label AS src, e.rel AS rel, d.label AS dst,"
-            "       e.source AS source, e.ts AS ts"
+            "       e.source AS source, e.ts AS ts, e.status AS status,"
+            "       e.source_type AS source_type, e.project AS project"
             " FROM edges e"
             " JOIN nodes s ON s.id = e.src"
             " JOIN nodes d ON d.id = e.dst"
-        ).fetchall()
+            " WHERE COALESCE(e.status, 'approved') NOT IN (?, ?)"
+        )
+        params: List[Any] = list(_EXCLUDED_BY_DEFAULT)
+        if project:
+            # This project's edges plus global (project-less) edges. Another
+            # project's experience must never be ranked into this digest.
+            sql += " AND (e.project = ? OR e.project IS NULL OR e.project = '')"
+            params.append(project)
+        rows = self.conn.execute(sql, params).fetchall()
         for row in rows:
             triple = "%s %s %s" % (row["src"], row["rel"], row["dst"])
             edge_tokens = set(tokenize(triple))
@@ -189,6 +325,9 @@ class GraphStore:
                     "ts": row["ts"],
                     "type": "experience",
                     "score": round(score, 6),
+                    "status": row["status"] or "approved",
+                    "source_type": row["source_type"] or "conversation",
+                    "project": row["project"],
                 }
             )
         results.sort(key=lambda e: (-e["score"], e["id"]))

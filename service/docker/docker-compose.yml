@@ -1,0 +1,71 @@
+# Non-RC1 / EXCLUDED from RC1 scope.
+# The API binds 127.0.0.1 inside the container; Docker port publishing to the
+# host loopback cannot reach that listener, and the server refuses 0.0.0.0.
+# This compose file is retained for reference only and is NOT part of the RC1
+# release. Do not publish ports for RC1.
+#
+# Jebat-Cortex cognitive runtime - optional secondary deployment target.
+#
+# This file is not part of the RC1 freeze and is not verified by the RC1 test
+# suite; launchd is the supported RC1 target.
+#
+# launchd (service/launchd/) is the primary target on Faisal's Mac. This file
+# exists for a Linux host or a disposable test environment.
+#
+# Ports are published on 127.0.0.1 only. Do NOT change "127.0.0.1:8765:8765" to
+# "8765:8765" - that would expose the memory API on every interface, which the
+# design forbids.
+#
+#   docker compose -f service/docker/docker-compose.yml up --build
+#   curl -s http://127.0.0.1:8765/v1/health
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: service/docker/Dockerfile
+    image: jebat-cortex:0.4.0
+    container_name: jebat-cortex-api
+    command: ["python3", "-m", "cli.cortex_cli", "serve", "--host", "127.0.0.1", "--port", "8765"]
+    # Loopback publish only.
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      # Admin token is not baked into the image; supply it at run time:
+      #   CORTEX_ADMIN_TOKEN=... docker compose up
+      CORTEX_ADMIN_TOKEN: "${CORTEX_ADMIN_TOKEN:-}"
+    volumes:
+      # Memory stores persist outside the container.
+      - cortex-data:/app/data
+      # Hermes corpus, mounted READ-ONLY. The runtime never writes it, and :ro
+      # makes that a kernel-enforced guarantee rather than a convention.
+      - "${HOME}/.hermes/state.db:/root/.hermes/state.db:ro"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8765/v1/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: service/docker/Dockerfile
+    image: jebat-cortex:0.4.0
+    container_name: jebat-cortex-worker
+    command: ["python3", "-m", "workers.ingest_worker"]
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+    volumes:
+      - cortex-data:/app/data
+      - "${HOME}/.hermes/state.db:/root/.hermes/state.db:ro"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  cortex-data:

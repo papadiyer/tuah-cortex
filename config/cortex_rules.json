@@ -51,6 +51,16 @@
     "data_dir": "data",
     "vector_db": "data/vector_store.db",
     "graph_db": "data/graph_store.db",
+    "queue_db": "data/event_queue.db",
     "sample_log": "data/sample_conversation.jsonl"
+  },
+  "service": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "max_prompt_chars": 32000,
+    "max_token_budget": 8192,
+    "max_body_bytes": 262144,
+    "queue_max_attempts": 5,
+    "worker_poll_seconds": 1.0
   }
 }

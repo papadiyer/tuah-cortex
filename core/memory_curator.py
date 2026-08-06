@@ -268,6 +268,141 @@ class Curator:
         }
 
 
+    # -- postflight events -------------------------------------------------
+    def ingest_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """Ingest one postflight event (EVENT_SCHEMA.md section 1).
+
+        A thin adapter over the same stores ``ingest()`` writes to - it does not
+        re-implement curation. Structured parts of the event carry explicit
+        provenance and status, so a *proposed* decision is stored as proposed
+        and never surfaces as approved (MEMORY_SCHEMA.md section 1).
+
+        Synchronous: the worker already owns a thread, and the stores are local
+        SQLite. Returns a per-type count summary.
+        """
+        event = dict(event or {})
+        # Fail loud rather than silently writing into a store whose vectors are
+        # not comparable with the active embedder.
+        try:
+            self.vector.check_compatibility(raise_on_mismatch=True)
+        except ValueError as exc:
+            raise ValueError("cannot ingest event into incompatible vector store: %s" % exc)
+
+        event_id = str(event.get("event_id") or "")
+        project = event.get("project")
+        timestamp = event.get("timestamp")
+        agent = event.get("agent") or "unknown"
+
+        def _provenance(memory_type: str, status: str, extra: Optional[Dict[str, Any]] = None):
+            meta = {
+                # VectorStore fingerprints on "source::text" to suppress
+                # re-ingesting the same log line twice. Scoping `source` to this
+                # event keeps that protection *within* an event while allowing
+                # two different events (or two projects) to record the same
+                # sentence. With a constant "agent_event" source, the second
+                # event's identical decision was silently dropped - memory loss
+                # reported as success, which this codebase must never do.
+                "source": "agent_event:%s" % (event_id or "unknown"),
+                "source_type": "agent_event",
+                "source_id": event_id,
+                "ts": timestamp,
+                "status": status,
+                "project": project,
+                "type": memory_type,
+                "agent": agent,
+            }
+            if extra:
+                meta.update(extra)
+            return meta
+
+        counts = {
+            "decisions": 0,
+            "lessons": 0,
+            "open_tasks": 0,
+            "artefacts": 0,
+            "experience_edges": 0,
+            "summary": 0,
+        }
+        # Items the store refused as duplicates. Reported, never hidden: a
+        # caller must be able to tell "stored 3 of 3" from "stored 2 of 3".
+        skipped: List[Dict[str, str]] = []
+
+        def _store(kind: str, text: str, meta: Dict[str, Any]) -> None:
+            if self.vector.add(text, meta) is not None:
+                counts[kind] += 1
+            else:
+                skipped.append({"kind": kind, "text": text[:120], "reason": "duplicate_fingerprint"})
+
+        # Decisions -> knowledge rows tagged with their real status.
+        for decision in event.get("decisions") or []:
+            text = (decision or {}).get("text", "").strip()
+            if not text:
+                continue
+            status = (decision.get("status") or "proposed").strip().lower()
+            meta = _provenance("decision", status, {"project": decision.get("project") or project})
+            _store("decisions", text, meta)
+
+        # Lessons are knowledge the runtime learned; approved by definition once
+        # the work completed, but still attributed to the event.
+        for lesson in event.get("lessons") or []:
+            text = (lesson or {}).get("text", "").strip()
+            if not text:
+                continue
+            meta = _provenance("knowledge", "approved", {"project": lesson.get("project") or project})
+            _store("lessons", text, meta)
+
+        # Open tasks are unresolved work: status 'proposed' until completed.
+        for task in event.get("open_tasks") or []:
+            title = (task or {}).get("title", "").strip()
+            if not title:
+                continue
+            status = (task.get("status") or "open").strip().lower()
+            normalised = "completed" if status == "completed" else "proposed"
+            meta = _provenance("task", normalised, {"project": task.get("project") or project})
+            _store("open_tasks", title, meta)
+
+        # Artefacts are structural facts -> experience graph.
+        for artefact in event.get("artefacts") or []:
+            ref = (artefact or {}).get("path_or_ref", "").strip()
+            if not ref:
+                continue
+            kind = (artefact.get("kind") or "file").strip() or "file"
+            edge_id = self.graph.add_edge(
+                agent,
+                "produced",
+                ref,
+                source="agent_event",
+                meta={
+                    "ts": timestamp,
+                    "status": "approved",
+                    "source_type": "agent_event",
+                    "project": project,
+                    "kind": kind,
+                },
+            )
+            if edge_id is not None:
+                counts["artefacts"] += 1
+
+        # The result summary is the event's own memory. Stored as knowledge so a
+        # later prompt can recall what was done, with the event's status.
+        summary = (event.get("result_summary") or "").strip()
+        if summary:
+            status = "approved" if (event.get("status") or "completed") == "completed" else "rejected"
+            _store("summary", summary, _provenance("experience", status))
+
+        return {
+            "event_id": event_id,
+            "request_id": event.get("request_id"),
+            "project": project,
+            "counts": counts,
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            "ingested": True,
+            "vector_total": self.vector.count(),
+            "graph_edges_total": self.graph.count_edges(),
+        }
+
+
 def read_log(log_path: str) -> Tuple[List[Dict[str, Any]], int]:
     """Parse a JSONL log. Returns (messages, malformed_line_count).
 
