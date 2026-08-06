@@ -204,6 +204,15 @@ class Curator:
 
     async def ingest(self, log_path: str) -> Dict[str, Any]:
         """Read a JSONL conversation log and persist both memory types."""
+        # Fail loud (not silent) if the knowledge store already holds vectors
+        # from a different embedding backend/dimension than the active one.
+        # Mixing them would make cosine scores meaningless; the caller must use
+        # a fresh db or flip the backend back.
+        try:
+            self.vector.check_compatibility(raise_on_mismatch=True)
+        except ValueError as exc:
+            raise ValueError("cannot ingest into incompatible vector store: %s" % exc)
+
         messages, malformed = read_log(log_path)
         source = os.path.basename(log_path)
 

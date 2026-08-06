@@ -259,43 +259,67 @@ def _clean_content(raw: Any) -> str:
     if not text:
         return ""
     # Some clients store structured content as a JSON blob. Keep the text parts,
-    # drop tool_use/tool_result entries.
+    # drop tool_use/tool_result/thinking entries.
     if text[0] in "[{":
         extracted = _text_from_structured(text)
-        # Only prefer the extracted form if it actually found text. An
-        # unrecognised JSON shape falls through to the raw string rather than
-        # being silently dropped.
-        if extracted:
+        # _text_from_structured returns "" when the payload is recognised as a
+        # structured (tool/thinking) envelope with no human text; we drop it.
+        # It returns None only when the text is not valid JSON, in which case we
+        # fall through to the raw string rather than silently discarding it.
+        if extracted is not None:
             return extracted.strip()
     return text
 
 
 def _text_from_structured(text: str) -> Optional[str]:
-    """Pull human-readable text out of a JSON content payload. None if not JSON."""
+    """Pull human-readable text out of a JSON content payload.
+
+    Returns the joined text parts, "" when the payload is a recognised
+    tool/thinking envelope with no human text (so the caller drops it), or
+    None when the shape is unrecognised or the text is not valid JSON (so the
+    caller falls through to the raw string instead of silently dropping it).
+    """
     try:
         payload = json.loads(text)
     except ValueError:
         return None
+
+    # Walk states: 1 = found human text, 0 = recognised tool/thinking envelope
+    # (no memory-worthy text), -1 = unrecognised shape.
     parts: List[str] = []
 
-    def walk(node: Any) -> None:
+    def walk(node: Any) -> int:
         if isinstance(node, str):
             parts.append(node)
-        elif isinstance(node, list):
+            return 1
+        if isinstance(node, list):
+            best = -1
             for item in node:
-                walk(item)
-        elif isinstance(node, dict):
-            if node.get("type") in ("tool_use", "tool_result", "thinking"):
-                return
+                result = walk(item)
+                if result == 1:
+                    return 1
+                if result == 0:
+                    best = 0
+            return best
+        if isinstance(node, dict):
+            node_type = node.get("type")
+            if node_type in ("tool_use", "tool_result", "thinking"):
+                return 0
             if isinstance(node.get("text"), str):
                 parts.append(node["text"])
-                return
+                return 1
             for key in ("content", "message"):
                 if key in node:
-                    walk(node[key])
-                    return
-    walk(payload)
-    return "\n".join(p for p in parts if p and p.strip())
+                    return walk(node[key])
+            return -1
+        return -1
+
+    state = walk(payload)
+    if state == 1:
+        return "\n".join(p for p in parts if p and p.strip())
+    if state == 0:
+        return ""  # tool/thinking envelope: drop it
+    return None  # unrecognised JSON or non-JSON: let caller keep raw text
 
 
 def export_session_jsonl(

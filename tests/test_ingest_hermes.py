@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.graph_store import GraphStore  # noqa: E402
 from core.ingest_hermes import (  # noqa: E402
     HermesIngestError,
+    _clean_content,
     connect_readonly,
     export_session_jsonl,
     iter_messages,
@@ -362,6 +363,48 @@ class TestCuratorChain(HermesFixtureCase):
             0,
             "curator stored nothing from the Hermes export",
         )
+
+
+class TestToolOnlyPayloadDropped(unittest.TestCase):
+    """Regression for P1: a tool-only structured payload must NOT be kept as
+    memory. Faisal's reproducer returned the raw JSON (with 'thinking' content)
+    verbatim; that leaks machine chatter into the corpus.
+    """
+
+    def test_tool_result_with_thinking_is_dropped(self):
+        payload = json.dumps(
+            {
+                "type": "tool_result",
+                "content": [{"type": "thinking", "text": "secret internal reasoning"}],
+            }
+        )
+        self.assertEqual(_clean_content(payload), "")
+
+    def test_tool_use_envelope_is_dropped(self):
+        payload = json.dumps(
+            {"type": "tool_use", "name": "read_file", "input": {"path": "/etc/passwd"}}
+        )
+        self.assertEqual(_clean_content(payload), "")
+
+    def test_list_of_tool_results_is_dropped(self):
+        payload = json.dumps(
+            [
+                {"type": "tool_result", "content": [{"type": "thinking", "text": "x"}]},
+                {"type": "tool_use", "name": "y", "input": {}},
+            ]
+        )
+        self.assertEqual(_clean_content(payload), "")
+
+    def test_thinking_block_alone_is_dropped(self):
+        self.assertEqual(_clean_content(json.dumps({"type": "thinking", "text": "nope"})), "")
+
+    def test_human_text_in_structured_is_kept(self):
+        payload = json.dumps({"type": "text", "text": "Faisal prefers short answers"})
+        self.assertEqual(_clean_content(payload), "Faisal prefers short answers")
+
+    def test_non_json_bracket_string_is_kept_verbatim(self):
+        # Not valid JSON - must NOT be dropped (only genuine tool envelopes are).
+        self.assertEqual(_clean_content("[just a plain note]"), "[just a plain note]")
 
 
 if __name__ == "__main__":
