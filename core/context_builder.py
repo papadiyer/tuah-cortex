@@ -59,6 +59,14 @@ class ContextBuilder:
 
     # -- retrieval ---------------------------------------------------------
     def retrieve(self, prompt: str) -> Dict[str, List[Dict[str, Any]]]:
+        # Fail loud (not silent) if the knowledge store was built with a
+        # different embedding identity (backend/model/dimension) than the one
+        # now configured. A mismatch means old rows are not comparable to the
+        # probe vector, so query() would silently drop them from retrieval -
+        # exactly the silent memory-loss failure we must not tolerate in
+        # production. The caller must re-embed (or switch back) before retrieval.
+        self.vector.check_compatibility(raise_on_mismatch=True)
+
         retrieval = self.rules["retrieval"]
         knowledge = self.vector.query(prompt, int(retrieval["vector_top_k"]))
         experience = self.graph.query(prompt, int(retrieval["graph_top_k"]))

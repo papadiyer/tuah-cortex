@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.context_builder import ContextBuilder  # noqa: E402
 from core.graph_store import GraphStore  # noqa: E402
-from core.rules import load_rules, truncate  # noqa: E402
+from core.rules import Embedder, load_rules, truncate  # noqa: E402
 from core.vector_store import VectorStore  # noqa: E402
 
 RULES = load_rules()
@@ -166,6 +166,128 @@ class TestRipgrepIntegration(unittest.TestCase):
             self.assertIsInstance(context["ripgrep_available"], bool)
         finally:
             builder.close()
+
+
+class TestRetrievalFailsLoudOnIdentityMismatch(unittest.TestCase):
+    """Regression for P1#1 final gap: production retrieval must NOT fail silent.
+
+    query() defensively skips incompatible rows, but the production path
+    (ContextBuilder.retrieve -> build) must raise when the knowledge store's
+    embedding identity (backend/model/dim) differs from the active embedder -
+    otherwise old memory silently disappears from the digest with no error.
+    """
+
+    def _seed_store(self, tmp_path, embedder):
+        class _Store(Embedder):
+            name = "fake"
+
+            def __init__(self, dim, model):
+                self._d = dim
+                self.model_name = model
+
+            @property
+            def dimensions(self):
+                return self._d
+
+            @property
+            def model(self):
+                return self.model_name
+
+            def embed(self, text):
+                v = [0.0] * self._d
+                for c in text:
+                    v[ord(c) % self._d] += 1.0
+                return v
+
+        store = VectorStore(tmp_path, rules=RULES, embedder=_Store(3, "model-a"))
+        store.add("legacy memory from model A", {"source": "s"})
+        store.close()
+
+    def test_build_raises_on_identity_mismatch(self):
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            self._seed_store(tmp.name, None)
+
+            class _Other(Embedder):
+                name = "fake"
+
+                def __init__(self):
+                    self._d = 3
+                    self.model_name = "model-b"
+
+                @property
+                def dimensions(self):
+                    return self._d
+
+                @property
+                def model(self):
+                    return self.model_name
+
+                def embed(self, text):
+                    v = [0.0] * self._d
+                    for c in text:
+                        v[ord(c) % self._d] += 1.0
+                    return v
+
+            vector = VectorStore(tmp.name, rules=RULES, embedder=_Other())
+            builder = ContextBuilder(
+                vector_store=vector,
+                graph_store=GraphStore(":memory:"),
+                use_ripgrep=False,
+            )
+            try:
+                with self.assertRaises(ValueError):
+                    builder.build("legacy memory from model A")
+            finally:
+                builder.close()
+        finally:
+            os.unlink(tmp.name)
+
+    def test_retrieve_raises_before_query(self):
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            self._seed_store(tmp.name, None)
+
+            class _Other(Embedder):
+                name = "fake"
+
+                def __init__(self):
+                    self._d = 3
+                    self.model_name = "model-b"
+
+                @property
+                def dimensions(self):
+                    return self._d
+
+                @property
+                def model(self):
+                    return self.model_name
+
+                def embed(self, text):
+                    v = [0.0] * self._d
+                    for c in text:
+                        v[ord(c) % self._d] += 1.0
+                    return v
+
+            vector = VectorStore(tmp.name, rules=RULES, embedder=_Other())
+            builder = ContextBuilder(
+                vector_store=vector,
+                graph_store=GraphStore(":memory:"),
+                use_ripgrep=False,
+            )
+            try:
+                with self.assertRaises(ValueError):
+                    builder.retrieve("legacy memory from model A")
+            finally:
+                builder.close()
+        finally:
+            os.unlink(tmp.name)
 
 
 if __name__ == "__main__":
