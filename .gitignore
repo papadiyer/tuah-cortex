@@ -6,3 +6,9 @@ __pycache__/
 
 # Generated from the real Hermes corpus - contains private conversation text.
 data/hermes_export.jsonl
+
+# Local Graphify knowledge-graph output (generated, not source)
+graphify-out/
+
+# Python virtualenv for graphify (isolated install, per Faisal directive)
+.venv-graphify/
