@@ -1,6 +1,7 @@
 """Memory curator: classification, segmentation, relation extraction, ingest."""
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -8,7 +9,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.graph_store import GraphStore  # noqa: E402
-from core.memory_curator import Curator, read_log  # noqa: E402
+from core.memory_curator import Curator, _RELATION_CUE_WORDS, read_log  # noqa: E402
 from core.vector_store import VectorStore  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "tiny_conversation.jsonl")
@@ -166,6 +167,52 @@ class TestIngest(unittest.TestCase):
         finally:
             vector.close()
             graph.close()
+
+
+class TestNoDegenerateEdges(unittest.TestCase):
+    """Regression: a relation cue word must never become an edge's object.
+
+    A real corpus can contain a sentence that literally ends in a cue word
+    (e.g. "core/memory_curator.py writes to data/vector_store.db for knowledge
+    and data/graph_store.db for experience"). The extractor must route the
+    object to a real entity, never to the cue word itself.
+    """
+
+    def test_cue_word_never_becomes_object(self):
+        import tempfile
+
+        log = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        )
+        log.write(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "content": "core/memory_curator.py writes to data/vector_store.db "
+                    "for knowledge and data/graph_store.db for experience.",
+                }
+            )
+            + "\n"
+        )
+        log.close()
+
+        vector = VectorStore(":memory:")
+        graph = GraphStore(":memory:")
+        curator = Curator(vector_store=vector, graph_store=graph)
+        try:
+            report = asyncio.run(curator.ingest(log.name))
+            self.assertGreater(report["experience_edges"], 0)
+            # No edge may point at a relation cue word.
+            for cue in _RELATION_CUE_WORDS:
+                hits = graph.query(cue, top_k=100)
+                for hit in hits:
+                    self.assertNotEqual(
+                        hit["dst"], cue, "edge object is a relation cue word: %s" % hit
+                    )
+        finally:
+            vector.close()
+            graph.close()
+            os.unlink(log.name)
 
 
 if __name__ == "__main__":

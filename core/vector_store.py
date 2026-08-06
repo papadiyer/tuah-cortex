@@ -1,8 +1,12 @@
 """SQLite-backed vector store for Knowledge entries.
 
-Embeddings are computed locally (see core.rules.embed) and stored as a JSON
-blob, so the database is portable and inspectable. Ranking is cosine similarity
-computed in pure Python over the candidate rows.
+Embeddings come from a pluggable Embedder (see core.rules.get_embedder) and are
+stored as a JSON blob, so the database is portable and inspectable. Ranking is
+cosine similarity computed in pure Python over the candidate rows.
+
+The store never calls a specific embedding function directly: pass ``embedder=``
+to swap backends. Mixing vectors from two different backends in one database
+would make cosine scores meaningless, so use a separate db per backend.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from core.rules import cosine, embed, load_rules, repo_path
+from core.rules import Embedder, cosine, get_embedder, load_rules, repo_path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -37,8 +41,14 @@ def _utc_now() -> str:
 class VectorStore:
     """Semantic long-term memory. Deterministic, local, no network."""
 
-    def __init__(self, db_path: Optional[str] = None, rules: Optional[dict] = None):
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        rules: Optional[dict] = None,
+        embedder: Optional[Embedder] = None,
+    ):
         self.rules = rules or load_rules()
+        self.embedder = embedder if embedder is not None else get_embedder(self.rules)
         if db_path is None:
             db_path = repo_path(self.rules["paths"]["vector_db"])
         self.db_path = db_path
@@ -73,7 +83,7 @@ class VectorStore:
         source = meta.pop("source", None)
         ts = meta.pop("ts", None) or _utc_now()
         entry_type = meta.pop("type", "knowledge")
-        vector = embed(text, self.rules)
+        vector = self.embedder.embed(text)
         fingerprint = "%s::%s" % (source or "", text)
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO knowledge"
@@ -118,7 +128,7 @@ class VectorStore:
         """Return the top_k knowledge entries ranked by cosine similarity."""
         if top_k is None:
             top_k = int(self.rules["retrieval"]["vector_top_k"])
-        probe = embed(text, self.rules)
+        probe = self.embedder.embed(text)
         if not any(probe):
             return []
         min_score = float(self.rules["retrieval"].get("min_score", 0.0))

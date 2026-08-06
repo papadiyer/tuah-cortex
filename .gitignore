@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.db
 .DS_Store
+
+# Generated from the real Hermes corpus - contains private conversation text.
+data/hermes_export.jsonl

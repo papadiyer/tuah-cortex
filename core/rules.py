@@ -1,18 +1,27 @@
-"""Shared configuration loading, tokenisation and the local embedding function.
+"""Shared configuration loading, tokenisation and the pluggable embedder.
 
-No network calls, no third-party dependencies. The embedding is a deterministic
-hashed bag-of-words (plus character n-grams) vector, so the same text always
-produces the same vector on any machine and any Python 3.9+ interpreter.
+No network calls and no third-party dependencies in the default path. The
+default embedding is a deterministic hashed bag-of-words (plus character
+n-grams) vector, so the same text always produces the same vector on any
+machine and any Python 3.9+ interpreter.
+
+A stronger semantic backend (sentence-transformers) can be opted into via
+``embedding.backend`` in cortex_rules.json. That package is imported lazily, on
+instantiation only - importing this module never requires it.
 """
 
 from __future__ import annotations
 
+import abc
 import hashlib
+import importlib
+import importlib.util
 import json
 import math
 import os
 import re
-from typing import Dict, Iterable, List, Optional, Sequence
+import warnings
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_RULES_PATH = os.path.join(REPO_ROOT, "config", "cortex_rules.json")
@@ -63,35 +72,171 @@ def _bucket(token: str, dimensions: int) -> int:
     return int.from_bytes(digest, "big") % dimensions
 
 
-def embed(text: str, rules: Optional[dict] = None) -> List[float]:
-    """Deterministic L2-normalised hashed bag-of-words + char-ngram vector.
+DEFAULT_BACKEND = "deterministic"
+SENTENCE_TRANSFORMERS_BACKEND = "sentence-transformers"
+
+
+class EmbedderUnavailableError(RuntimeError):
+    """Raised when a requested embedding backend cannot be used on this host."""
+
+
+class Embedder(abc.ABC):
+    """Interface every embedding backend implements.
+
+    Stores depend on this, not on a concrete function, so a different backend
+    can be swapped in without touching the store code.
+    """
+
+    name = "embedder"
+
+    @property
+    @abc.abstractmethod
+    def dimensions(self) -> int:
+        """Length of every vector this embedder returns."""
+
+    @abc.abstractmethod
+    def embed(self, text: str) -> List[float]:
+        """Return the embedding vector for ``text``."""
+
+    def __call__(self, text: str) -> List[float]:
+        return self.embed(text)
+
+
+class DeterministicEmbedder(Embedder):
+    """Hashed bag-of-words + char-ngram vector. Local, stable, dependency-free.
 
     Word tokens carry full weight; character n-grams carry ``ngram_weight`` so
     that near-miss spellings and shared roots still overlap a little.
     """
+
+    name = DEFAULT_BACKEND
+
+    def __init__(self, rules: Optional[dict] = None):
+        self.rules = rules or load_rules()
+        cfg = self.rules["embedding"]
+        self._dimensions = int(cfg["dimensions"])
+        self._ngram_size = int(cfg["ngram_size"])
+        self._ngram_weight = float(cfg["ngram_weight"])
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def embed(self, text: str) -> List[float]:
+        dimensions = self._dimensions
+        ngram_size = self._ngram_size
+        ngram_weight = self._ngram_weight
+
+        vector = [0.0] * dimensions
+        for token in tokenize(text):
+            vector[_bucket(token, dimensions)] += 1.0
+            if ngram_weight > 0 and len(token) > ngram_size:
+                for i in range(len(token) - ngram_size + 1):
+                    gram = token[i : i + ngram_size]
+                    vector[_bucket("#" + gram, dimensions)] += ngram_weight
+
+        # Sub-linear term damping, then L2 normalisation so cosine == dot product.
+        for i, value in enumerate(vector):
+            if value:
+                vector[i] = 1.0 + math.log(value)
+        norm = math.sqrt(sum(v * v for v in vector))
+        if norm == 0.0:
+            return vector
+        return [v / norm for v in vector]
+
+
+class SentenceTransformerEmbedder(Embedder):
+    """Optional semantic backend. Imports sentence-transformers lazily.
+
+    Instantiating this class is the only thing that touches the package. If it
+    is not installed, construction raises EmbedderUnavailableError - we never
+    pip-install and never silently fall back from here (the caller decides).
+    """
+
+    name = SENTENCE_TRANSFORMERS_BACKEND
+
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", rules: Optional[dict] = None):
+        self.rules = rules
+        self.model_name = model_name
+        try:
+            module = importlib.import_module("sentence_transformers")
+        except Exception as exc:  # ImportError, or a broken/partial install
+            raise EmbedderUnavailableError(
+                "sentence-transformers backend unavailable (%s: %s); "
+                "install it or set embedding.backend to '%s'"
+                % (type(exc).__name__, exc, DEFAULT_BACKEND)
+            )
+        try:
+            self._model = module.SentenceTransformer(model_name)
+        except Exception as exc:
+            raise EmbedderUnavailableError(
+                "could not load sentence-transformers model %r (%s: %s)"
+                % (model_name, type(exc).__name__, exc)
+            )
+        reported = self._model.get_sentence_embedding_dimension()
+        if not reported:
+            raise EmbedderUnavailableError(
+                "model %r reported no embedding dimension" % model_name
+            )
+        self._dimensions = int(reported)
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def embed(self, text: str) -> List[float]:
+        vector = self._model.encode(text or "", normalize_embeddings=True)
+        return [float(v) for v in vector]
+
+
+def sentence_transformers_available() -> bool:
+    """True if the optional package can be imported. Never raises."""
+    try:
+        return importlib.util.find_spec("sentence_transformers") is not None
+    except Exception:
+        return False
+
+
+def get_embedder(rules: Optional[dict] = None, **kwargs: Any) -> Embedder:
+    """Factory: the backend named in ``embedding.backend``, else deterministic.
+
+    Falls back to the deterministic backend (with a warning, not a crash) when
+    sentence-transformers is requested but unusable, so a config change on a
+    machine without the package degrades instead of breaking the pipeline.
+    """
     rules = rules or load_rules()
-    cfg = rules["embedding"]
-    dimensions = int(cfg["dimensions"])
-    ngram_size = int(cfg["ngram_size"])
-    ngram_weight = float(cfg["ngram_weight"])
+    backend = str(rules["embedding"].get("backend", DEFAULT_BACKEND)).strip().lower()
 
-    vector = [0.0] * dimensions
-    tokens = tokenize(text)
-    for token in tokens:
-        vector[_bucket(token, dimensions)] += 1.0
-        if ngram_weight > 0 and len(token) > ngram_size:
-            for i in range(len(token) - ngram_size + 1):
-                gram = token[i : i + ngram_size]
-                vector[_bucket("#" + gram, dimensions)] += ngram_weight
+    if backend in (DEFAULT_BACKEND, "", "local", "hashed"):
+        return DeterministicEmbedder(rules)
 
-    # Sub-linear term damping, then L2 normalisation so cosine == dot product.
-    for i, value in enumerate(vector):
-        if value:
-            vector[i] = 1.0 + math.log(value)
-    norm = math.sqrt(sum(v * v for v in vector))
-    if norm == 0.0:
-        return vector
-    return [v / norm for v in vector]
+    if backend in (SENTENCE_TRANSFORMERS_BACKEND, "sentence_transformers", "st"):
+        model_name = str(
+            rules["embedding"].get("model", kwargs.pop("model_name", "all-MiniLM-L6-v2"))
+        )
+        try:
+            return SentenceTransformerEmbedder(model_name, rules=rules)
+        except EmbedderUnavailableError as exc:
+            warnings.warn(
+                "%s - falling back to the %s embedder" % (exc, DEFAULT_BACKEND),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return DeterministicEmbedder(rules)
+
+    raise ValueError(
+        "unknown embedding backend %r (expected %r or %r)"
+        % (backend, DEFAULT_BACKEND, SENTENCE_TRANSFORMERS_BACKEND)
+    )
+
+
+def embed(text: str, rules: Optional[dict] = None) -> List[float]:
+    """Deterministic L2-normalised embedding (the v0.1 default backend).
+
+    Kept as a module-level function so existing callers and tests keep working;
+    it is a thin wrapper over DeterministicEmbedder.
+    """
+    return DeterministicEmbedder(rules).embed(text)
 
 
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:

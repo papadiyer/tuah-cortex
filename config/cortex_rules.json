@@ -17,6 +17,7 @@
     "classification_margin": 0.0
   },
   "embedding": {
+    "backend": "deterministic",
     "dimensions": 512,
     "ngram_size": 4,
     "ngram_weight": 0.35
