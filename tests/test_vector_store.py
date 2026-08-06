@@ -95,14 +95,19 @@ class TestVectorStore(unittest.TestCase):
 class _FakeEmbedder(Embedder):
     """A deliberately different-dimension backend for the mixing regression."""
 
-    name = "fake-3d"
+    name = "fake"
 
-    def __init__(self, dim=3):
+    def __init__(self, dim=3, model="fake-model-a"):
         self._dim = dim
+        self.model_name = model
 
     @property
     def dimensions(self):
         return self._dim
+
+    @property
+    def model(self):
+        return self.model_name
 
     def embed(self, text):
         vector = [0.0] * self._dim
@@ -112,12 +117,12 @@ class _FakeEmbedder(Embedder):
 
 
 class TestBackendMismatchIsNotSilent(unittest.TestCase):
-    """Regression for P1: a dimension/backend flip must not silently mix.
+    """Regression for P1: a backend/model/dimension flip must not silently mix.
 
-    Reproduces Faisal's finding - deterministic (512-d) rows already in the db,
-    then a different-dimension backend queries the same db. Old memory must not
-    be silently dropped from ranking, nor mixed: the store must skip mismatched
-    rows and the curator must fail loud via check_compatibility().
+    Covers both Faisal findings: (a) different dimension, and (b) SAME
+    dimension but different backend/model - which the first fix missed because
+    it only compared dimensions. The store must skip incompatible rows in
+    query() AND refuse to add them in add(), and report the mismatch loudly.
     """
 
     def setUp(self):
@@ -136,18 +141,20 @@ class TestBackendMismatchIsNotSilent(unittest.TestCase):
         seed.add("the memory char limit is 2200", {"source": "s"})
         seed.close()
 
-        # Reopen with a 3-d backend over the SAME file.
+        # Reopen with a 3-d backend over the SAME file. The store's identity is
+        # now deterministic/512, so query() must skip the old row entirely -
+        # it is not comparable and must not be silently ranked or mixed.
         other = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3))
-        other.add("a brand new fact", {"source": "s"})
-        hits = other.query("a brand new fact", top_k=10)
-
+        hits = other.query("the memory char limit is 2200", top_k=10)
         texts = [h["text"] for h in hits]
-        self.assertIn("a brand new fact", texts, "new-row must rank")
         self.assertNotIn(
             "the memory char limit is 2200",
             texts,
-            "old 512-d row must be skipped, not silently mixed/dropped",
+            "old 512-d row must be skipped under a different-dimension embedder",
         )
+        # And adding a different-identity row is refused at the API boundary.
+        with self.assertRaises(ValueError):
+            other.add("a brand new fact", {"source": "s"})
         other.close()
 
     def test_check_compatibility_reports_mismatch(self):
@@ -177,6 +184,53 @@ class TestBackendMismatchIsNotSilent(unittest.TestCase):
         tag = _json.loads(row[0])
         self.assertEqual(tag["backend"], "deterministic")
         self.assertEqual(tag["dim"], store_dims(self.rules))
+        self.assertIn("model", tag, "embed_meta must carry model identity")
+
+    def test_same_dimension_different_model_is_skipped_in_query(self):
+        # Faisal's exact repro: backend A (fake-model-a, 3-d) then backend B
+        # (fake-model-b, SAME 3-d). query() must NOT rank the A row, even though
+        # dimensions match - the embedding spaces are different.
+        seed = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-a"))
+        seed.add("legacy fact from model A", {"source": "s"})
+        seed.close()
+
+        other = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-b"))
+        hits = other.query("legacy fact from model A", top_k=10)
+        texts = [h["text"] for h in hits]
+        self.assertNotIn(
+            "legacy fact from model A",
+            texts,
+            "same-dim different-model row must be skipped, not mixed/ranked",
+        )
+        # Adding a different-identity row is refused at the API boundary.
+        with self.assertRaises(ValueError):
+            other.add("incompatible row", {"source": "s"})
+        other.close()
+
+    def test_add_refuses_incompatible_model_same_dim(self):
+        # The VectorStore API itself must reject a row whose identity differs
+        # from the store's, even at the same dimension - not rely on the curator.
+        seed = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-a"))
+        seed.add("seed row", {"source": "s"})
+        seed.close()
+
+        other = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-b"))
+        with self.assertRaises(ValueError):
+            other.add("incompatible row", {"source": "s"})
+        other.close()
+
+    def test_check_compatibility_reports_model_mismatch(self):
+        seed = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-a"))
+        seed.add("legacy row", {"source": "s"})
+        seed.close()
+
+        other = VectorStore(self.db_path, rules=self.rules, embedder=_FakeEmbedder(3, "model-b"))
+        report = other.check_compatibility()
+        self.assertEqual(report["mismatched"], 1)
+        self.assertEqual(report["active_model"], "model-b")
+        with self.assertRaises(ValueError):
+            other.check_compatibility(raise_on_mismatch=True)
+        other.close()
 
 
 def store_dims(rules):

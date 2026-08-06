@@ -94,6 +94,17 @@ class Embedder(abc.ABC):
     def dimensions(self) -> int:
         """Length of every vector this embedder returns."""
 
+    @property
+    def model(self) -> str:
+        """Stable identity of the embedding space (backend + model/revision).
+
+        Two embeddings are only comparable when their full identity matches -
+        same backend, same model, same dimension. Stores key on this, not just
+        on the dimension, so a same-dimension swap (e.g. one sentence-transformer
+        model for another) is detected and refused instead of silently mixed.
+        """
+        return self.name
+
     @abc.abstractmethod
     def embed(self, text: str) -> List[float]:
         """Return the embedding vector for ``text``."""
@@ -183,6 +194,13 @@ class SentenceTransformerEmbedder(Embedder):
     @property
     def dimensions(self) -> int:
         return self._dimensions
+
+    @property
+    def model(self) -> str:
+        # The concrete model name is the identity of the embedding space; two
+        # different sentence-transformer models are NOT interchangeable even
+        # when their dimensions match.
+        return self.model_name
 
     def embed(self, text: str) -> List[float]:
         vector = self._model.encode(text or "", normalize_embeddings=True)

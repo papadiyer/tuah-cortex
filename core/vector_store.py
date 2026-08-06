@@ -77,6 +77,10 @@ class VectorStore:
         self.conn.executescript(SCHEMA)
         _ensure_embed_meta(self.conn)
         self.conn.commit()
+        # Capture the store's embedding identity from existing rows so add()
+        # and query() can enforce it without a full table scan per call. A
+        # mixed store (pre-existing corruption) fails loud at open.
+        self._store_identity = self._scan_identity()
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -103,9 +107,21 @@ class VectorStore:
         ts = meta.pop("ts", None) or _utc_now()
         entry_type = meta.pop("type", "knowledge")
         vector = self.embedder.embed(text)
-        tag = json.dumps(
-            {"backend": self.embedder.name, "dim": len(vector)}, sort_keys=True
-        )
+        row_identity = {
+            "backend": self.embedder.name,
+            "model": self.embedder.model,
+            "dim": len(vector),
+        }
+        # Refuse to mix incompatible embeddings at the API boundary, not just
+        # via the curator. The first write defines the store's identity; any
+        # later write with a different backend/model/dim is rejected loudly.
+        if self._store_identity is not None and row_identity != self._store_identity:
+            raise ValueError(
+                "cannot add embedding with identity %s to vector store %s that "
+                "already holds identity %s"
+                % (row_identity, self.db_path, self._store_identity)
+            )
+        tag = json.dumps(row_identity, sort_keys=True)
         fingerprint = "%s::%s" % (source or "", text)
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO knowledge"
@@ -125,6 +141,7 @@ class VectorStore:
         self.conn.commit()
         if cursor.rowcount == 0:
             return None
+        self._store_identity = row_identity
         return int(cursor.lastrowid)
 
     def add_many(self, items: List[Dict[str, Any]]) -> int:
@@ -148,29 +165,34 @@ class VectorStore:
         return [self._row_to_dict(row) for row in rows]
 
     def query(self, text: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Return the top_k knowledge entries ranked by cosine similarity."""
+        """Return the top_k knowledge entries ranked by cosine similarity.
+
+        Only rows whose full embedding identity (backend + model + dim) matches
+        the active embedder are ranked. Rows from a different embedding space
+        are skipped - they would score nonsense against the probe, so ranking
+        them would silently pollute the result with unrelated memory.
+        """
         if top_k is None:
             top_k = int(self.rules["retrieval"]["vector_top_k"])
         probe = self.embedder.embed(text)
         if not any(probe):
             return []
+        active = self._active_identity()
         min_score = float(self.rules["retrieval"].get("min_score", 0.0))
 
         scored: List[Dict[str, Any]] = []
         for row in self.conn.execute(
             "SELECT id, text, embedding, source, ts, type, meta, embed_meta FROM knowledge"
         ):
+            identity = self._row_identity(row["embed_meta"])
+            if identity != active:
+                # Different backend / model / dimension: not comparable. Skip
+                # explicitly rather than letting cosine return a misleading
+                # score. The store identity is reported via check_compatibility().
+                continue
             try:
                 vector = json.loads(row["embedding"])
             except (TypeError, ValueError):
-                continue
-            # Skip rows whose embedding dimension does not match the active
-            # backend. A different-dim vector would score 0.0 against the probe
-            # (cosine returns 0 on length mismatch) and be silently dropped -
-            # old memory would go unranked with no error. We skip it explicitly
-            # and keep the row visible via check_compatibility() so the caller
-            # can fail loudly instead of trusting a partially-ranked result.
-            if len(vector) != len(probe):
                 continue
             score = cosine(probe, vector)
             if score < min_score:
@@ -182,50 +204,85 @@ class VectorStore:
         scored.sort(key=lambda e: (-e["score"], e["id"]))
         return scored[:top_k]
 
-    def check_compatibility(self, raise_on_mismatch: bool = False) -> Dict[str, Any]:
-        """Report whether existing rows match the active embedder.
+    @staticmethod
+    def _row_identity(raw_meta: Any) -> Dict[str, Any]:
+        """Normalise a stored embed_meta blob into an identity dict.
 
-        Returns {total, matched, mismatched, active_backend, active_dim}.
-        With ``raise_on_mismatch=True``, raises ValueError when any row's
-        stored backend/dimension differs from the active embedder - this is
-        how the curator/CLI catches a backend flip (e.g. deterministic ->
-        sentence-transformers) before it silently mixes incompatible vectors.
+        Unknown/missing metadata is treated as a fully-unknown identity so it
+        never silently matches the active embedder.
         """
-        active_backend = self.embedder.name
-        active_dim = self.embedder.dimensions
+        if not raw_meta:
+            return {"backend": None, "model": None, "dim": None}
+        try:
+            tag = json.loads(raw_meta)
+        except (TypeError, ValueError):
+            return {"backend": None, "model": None, "dim": None}
+        return {
+            "backend": tag.get("backend"),
+            "model": tag.get("model"),
+            "dim": int(tag.get("dim", -1)),
+        }
+
+    def _active_identity(self) -> Dict[str, Any]:
+        return {
+            "backend": self.embedder.name,
+            "model": self.embedder.model,
+            "dim": self.embedder.dimensions,
+        }
+
+    def _scan_identity(self) -> Optional[Dict[str, Any]]:
+        """Identity of existing rows, or None if the store is empty.
+
+        Raises ValueError if the store already holds rows from more than one
+        embedding identity - that is pre-existing corruption and must not be
+        trusted or silently "fixed" by a later write.
+        """
+        seen: Optional[Dict[str, Any]] = None
+        for (raw,) in self.conn.execute("SELECT embed_meta FROM knowledge"):
+            ident = self._row_identity(raw)
+            if seen is None:
+                seen = ident
+            elif ident != seen:
+                raise ValueError(
+                    "vector store %s already holds mixed embedding identities "
+                    "(%s vs %s); use a fresh database" % (self.db_path, seen, ident)
+                )
+        return seen
+
+    def check_compatibility(self, raise_on_mismatch: bool = False) -> Dict[str, Any]:
+        """Report whether existing rows match the active embedder identity.
+
+        Returns {total, matched, mismatched, active_backend, active_model,
+        active_dim}. With ``raise_on_mismatch=True``, raises ValueError when any
+        row's stored backend/model/dimension differs from the active embedder -
+        this is how the curator/CLI catches a backend or model flip (e.g.
+        deterministic -> sentence-transformers, or one ST model for another
+        with the same dimension) before it silently mixes incompatible vectors.
+        """
+        active = self._active_identity()
         total = 0
         matched = 0
         mismatched = 0
         for row in self.conn.execute("SELECT embed_meta FROM knowledge"):
             total += 1
-            raw = row["embed_meta"]
-            if not raw:
-                # Pre-tag row: unknown backend. Treat as a mismatch so a backend
-                # flip is caught rather than trusted.
-                mismatched += 1
-                continue
-            try:
-                tag = json.loads(raw)
-            except (TypeError, ValueError):
-                mismatched += 1
-                continue
-            if tag.get("backend") == active_backend and int(tag.get("dim", -1)) == active_dim:
+            if self._row_identity(row["embed_meta"]) == active:
                 matched += 1
             else:
                 mismatched += 1
         if raise_on_mismatch and mismatched:
             raise ValueError(
                 "vector store %s holds %d row(s) from a different embedding "
-                "backend/dimension than the active embedder (backend=%s dim=%d). "
-                "Use a fresh database or switch back the embedding.backend config."
-                % (self.db_path, mismatched, active_backend, active_dim)
+                "identity than the active embedder (backend=%s model=%s dim=%d). "
+                "Use a fresh database or switch back the embedding config."
+                % (self.db_path, mismatched, active["backend"], active["model"], active["dim"])
             )
         return {
             "total": total,
             "matched": matched,
             "mismatched": mismatched,
-            "active_backend": active_backend,
-            "active_dim": active_dim,
+            "active_backend": active["backend"],
+            "active_model": active["model"],
+            "active_dim": active["dim"],
         }
 
     # -- helpers -----------------------------------------------------------
