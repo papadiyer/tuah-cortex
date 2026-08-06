@@ -168,8 +168,25 @@ class CortexApp:
         self._lock = threading.Lock()
 
     def close(self) -> None:
-        if self._owns_service:
+        """Close the service if this app created it. Idempotent.
+
+        An injected service belongs to the caller and is left alone.
+        """
+        if getattr(self, "_owns_service", False):
             self.service.close()
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "CortexApp":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def dispatch(
         self,

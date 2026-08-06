@@ -1,25 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Jebat-Cortex cognitive runtime (RC1 / v0.4) - macOS launchd agent.
+  Jebat-Cortex API (serve) - macOS launchd agent.
 
   Install (per-user LaunchAgent, no sudo):
-    1. Edit CORTEX_HOME and ProgramArguments[0] below if your paths differ.
-    2. cp service/launchd/com.m5.jebat-cortex.plist ~/Library/LaunchAgents/
-    3. launchctl load  ~/Library/LaunchAgents/com.m5.jebat-cortex.plist
-       launchctl start com.m5.jebat-cortex
-    4. Verify: curl -s http://127.0.0.1:8765/v1/health
+    cp service/launchd/com.m5.jebat-cortex.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.m5.jebat-cortex.plist
+    curl -s http://127.0.0.1:8765/v1/health
 
-  Uninstall:
-    launchctl unload ~/Library/LaunchAgents/com.m5.jebat-cortex.plist
+  THIS IS HALF THE SYSTEM. Also load com.m5.jebat-cortex-worker.plist, or the
+  API will accept events into the queue and nothing will ever drain them.
+  See docs/SERVICE_OPERATIONS.md.
 
-  Notes:
-    * The API binds 127.0.0.1 only; this agent never exposes a public port.
-    * CORTEX_ADMIN_TOKEN is intentionally NOT set here - putting a secret in a
-      plist would check it into the repo. Export it in your login shell or use
-      a keychain helper if you need the admin routes.
-    * This runs the API. Load com.m5.jebat-cortex-worker.plist for the ingest
-      worker, or run `python3 -m workers.ingest_worker` alongside it.
+  Paths: launchd does NOT expand ~ or $VAR in WorkingDirectory,
+  StandardOutPath or ProgramArguments - those keys are taken literally. So the
+  repo location is resolved inside a /bin/sh wrapper, which does expand, and no
+  user's home directory is hardcoded in this file. Override the defaults with:
+    launchctl setenv CORTEX_HOME   /path/to/jebat-cortex
+    launchctl setenv CORTEX_PYTHON /path/to/venv/bin/python3
+    launchctl setenv CORTEX_PORT   8765
+  (run those BEFORE `launchctl load`, or unload/load afterwards).
+
+  CORTEX_ADMIN_TOKEN is intentionally NOT set here - a plist in the repo must
+  never carry a secret. Export it via `launchctl setenv` if you need the admin
+  routes.
+
+  The API binds 127.0.0.1 only; this agent never exposes a public port.
 -->
 <plist version="1.0">
 <dict>
@@ -28,27 +34,19 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/env</string>
-        <string>python3</string>
-        <string>-m</string>
-        <string>cli.cortex_cli</string>
-        <string>serve</string>
-        <string>--host</string>
-        <string>127.0.0.1</string>
-        <string>--port</string>
-        <string>8765</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>set -eu
+CORTEX_HOME="${CORTEX_HOME:-$HOME/dev/projects/the-magnificent-5/jebat-cortex}"
+PYTHON="${CORTEX_PYTHON:-python3}"
+cd "$CORTEX_HOME"
+mkdir -p logs
+exec >>logs/cortex-api.out.log 2>>logs/cortex-api.err.log
+export PYTHONPATH="$CORTEX_HOME"
+export PYTHONUNBUFFERED=1
+exec "$PYTHON" -m cli.cortex_cli serve --host 127.0.0.1 --port "${CORTEX_PORT:-8765}"
+</string>
     </array>
-
-    <key>WorkingDirectory</key>
-    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PYTHONPATH</key>
-        <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex</string>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
-    </dict>
 
     <key>RunAtLoad</key>
     <true/>
@@ -61,12 +59,6 @@
 
     <key>ThrottleInterval</key>
     <integer>10</integer>
-
-    <key>StandardOutPath</key>
-    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-api.out.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/logs/cortex-api.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

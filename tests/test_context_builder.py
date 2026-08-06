@@ -11,17 +11,27 @@ from core.context_builder import ContextBuilder  # noqa: E402
 from core.graph_store import GraphStore  # noqa: E402
 from core.rules import Embedder, load_rules, truncate  # noqa: E402
 from core.vector_store import VectorStore  # noqa: E402
+from tests.support import closing  # noqa: E402
 
 RULES = load_rules()
 USER_LIMIT = RULES["limits"]["user_char_limit"]
 MEMORY_LIMIT = RULES["limits"]["memory_char_limit"]
 
 
-def _builder(use_ripgrep=False):
-    return ContextBuilder(
-        vector_store=VectorStore(":memory:"),
-        graph_store=GraphStore(":memory:"),
-        use_ripgrep=use_ripgrep,
+def _builder(testcase, use_ripgrep=False):
+    """Build over two in-memory stores, all three closed by test cleanup.
+
+    The stores are injected, so the builder does NOT own them (see
+    ContextBuilder.own_stores) and will not close them - the test must, or the
+    connections survive until GC and raise ResourceWarning.
+    """
+    return closing(
+        testcase,
+        ContextBuilder(
+            vector_store=closing(testcase, VectorStore(":memory:")),
+            graph_store=closing(testcase, GraphStore(":memory:")),
+            use_ripgrep=use_ripgrep,
+        ),
     )
 
 
@@ -38,10 +48,7 @@ class TestBudgetEnforcement(unittest.TestCase):
     """Acceptance criteria: the two hard limits, proven on over-long input."""
 
     def setUp(self):
-        self.builder = _builder()
-
-    def tearDown(self):
-        self.builder.close()
+        self.builder = _builder(self)
 
     def test_limits_loaded_from_config(self):
         self.assertEqual(self.builder.user_char_limit, 1375)
@@ -109,13 +116,10 @@ class TestBudgetEnforcement(unittest.TestCase):
 
 class TestMergeAndOutput(unittest.TestCase):
     def setUp(self):
-        self.builder = _builder()
+        self.builder = _builder(self)
         self.builder.vector.add("The memory char limit is 2200 characters", {"source": "cfg"})
         self.builder.vector.add("Faisal is the final approval authority", {"source": "cfg"})
         self.builder.graph.add_edge("core/context_builder.py", "imports", "core/vector_store.py")
-
-    def tearDown(self):
-        self.builder.close()
 
     def test_merges_both_memory_types(self):
         context = self.builder.build("memory char limit for context_builder")
@@ -141,14 +145,11 @@ class TestMergeAndOutput(unittest.TestCase):
         self.assertTrue(markdown.strip())
 
     def test_empty_stores_yield_graceful_digest(self):
-        empty = _builder()
-        try:
-            context = empty.build("nothing has been learned yet")
-            markdown = empty.to_markdown(context)
-            self.assertEqual(context["counts"]["knowledge"], 0)
-            self.assertIn("_no memory matched this prompt_", markdown)
-        finally:
-            empty.close()
+        empty = _builder(self)
+        context = empty.build("nothing has been learned yet")
+        markdown = empty.to_markdown(context)
+        self.assertEqual(context["counts"]["knowledge"], 0)
+        self.assertIn("_no memory matched this prompt_", markdown)
 
     def test_empty_prompt_does_not_crash(self):
         context = self.builder.build("")
@@ -158,14 +159,11 @@ class TestMergeAndOutput(unittest.TestCase):
 
 class TestRipgrepIntegration(unittest.TestCase):
     def test_fallback_used_only_when_graph_is_empty(self):
-        builder = _builder(use_ripgrep=True)
-        try:
-            # Graph has nothing; the fallback should search the real repo.
-            context = builder.build("VectorStore")
-            self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
-            self.assertIsInstance(context["ripgrep_available"], bool)
-        finally:
-            builder.close()
+        builder = _builder(self, use_ripgrep=True)
+        # Graph has nothing; the fallback should search the real repo.
+        context = builder.build("VectorStore")
+        self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
+        self.assertIsInstance(context["ripgrep_available"], bool)
 
 
 class TestRetrievalFailsLoudOnIdentityMismatch(unittest.TestCase):
@@ -203,91 +201,59 @@ class TestRetrievalFailsLoudOnIdentityMismatch(unittest.TestCase):
         store.add("legacy memory from model A", {"source": "s"})
         store.close()
 
-    def test_build_raises_on_identity_mismatch(self):
+    def _mismatched_builder(self):
+        """Seed a store with model-a rows, then reopen it under model-b.
+
+        Cleanups run last-registered-first, so the unlink registered here runs
+        after the store closes - the file is never removed while a connection
+        still holds it open.
+        """
         import tempfile
 
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
-        try:
-            self._seed_store(tmp.name, None)
+        self.addCleanup(os.unlink, tmp.name)
+        self._seed_store(tmp.name, None)
 
-            class _Other(Embedder):
-                name = "fake"
+        class _Other(Embedder):
+            name = "fake"
 
-                def __init__(self):
-                    self._d = 3
-                    self.model_name = "model-b"
+            def __init__(self):
+                self._d = 3
+                self.model_name = "model-b"
 
-                @property
-                def dimensions(self):
-                    return self._d
+            @property
+            def dimensions(self):
+                return self._d
 
-                @property
-                def model(self):
-                    return self.model_name
+            @property
+            def model(self):
+                return self.model_name
 
-                def embed(self, text):
-                    v = [0.0] * self._d
-                    for c in text:
-                        v[ord(c) % self._d] += 1.0
-                    return v
+            def embed(self, text):
+                v = [0.0] * self._d
+                for c in text:
+                    v[ord(c) % self._d] += 1.0
+                return v
 
-            vector = VectorStore(tmp.name, rules=RULES, embedder=_Other())
-            builder = ContextBuilder(
-                vector_store=vector,
-                graph_store=GraphStore(":memory:"),
+        return closing(
+            self,
+            ContextBuilder(
+                vector_store=closing(self, VectorStore(tmp.name, rules=RULES, embedder=_Other())),
+                graph_store=closing(self, GraphStore(":memory:")),
                 use_ripgrep=False,
-            )
-            try:
-                with self.assertRaises(ValueError):
-                    builder.build("legacy memory from model A")
-            finally:
-                builder.close()
-        finally:
-            os.unlink(tmp.name)
+            ),
+        )
+
+    def test_build_raises_on_identity_mismatch(self):
+        builder = self._mismatched_builder()
+        with self.assertRaises(ValueError):
+            builder.build("legacy memory from model A")
 
     def test_retrieve_raises_before_query(self):
-        import tempfile
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        try:
-            self._seed_store(tmp.name, None)
-
-            class _Other(Embedder):
-                name = "fake"
-
-                def __init__(self):
-                    self._d = 3
-                    self.model_name = "model-b"
-
-                @property
-                def dimensions(self):
-                    return self._d
-
-                @property
-                def model(self):
-                    return self.model_name
-
-                def embed(self, text):
-                    v = [0.0] * self._d
-                    for c in text:
-                        v[ord(c) % self._d] += 1.0
-                    return v
-
-            vector = VectorStore(tmp.name, rules=RULES, embedder=_Other())
-            builder = ContextBuilder(
-                vector_store=vector,
-                graph_store=GraphStore(":memory:"),
-                use_ripgrep=False,
-            )
-            try:
-                with self.assertRaises(ValueError):
-                    builder.retrieve("legacy memory from model A")
-            finally:
-                builder.close()
-        finally:
-            os.unlink(tmp.name)
+        builder = self._mismatched_builder()
+        with self.assertRaises(ValueError):
+            builder.retrieve("legacy memory from model A")
 
 
 if __name__ == "__main__":

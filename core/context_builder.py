@@ -39,17 +39,73 @@ class ContextBuilder:
         use_ripgrep: bool = True,
     ):
         self.rules = rules or load_rules()
+        # Ownership is tracked PER STORE, not as a single all-or-nothing flag.
+        # The old flag was `vector_store is None and graph_store is None`, so
+        # injecting exactly one store made the builder construct the other and
+        # then never close it - the store was dropped on the floor at GC time,
+        # which is precisely what raised ResourceWarning.
+        self._owns_vector = vector_store is None
+        self._owns_graph = graph_store is None
         self.vector = vector_store if vector_store is not None else VectorStore(rules=self.rules)
-        self.graph = graph_store if graph_store is not None else GraphStore(rules=self.rules)
-        self._owns_stores = vector_store is None and graph_store is None
+        try:
+            self.graph = graph_store if graph_store is not None else GraphStore(rules=self.rules)
+        except Exception:
+            # Opening the graph failed after the vector store was created here.
+            # Close what we own before propagating, or that handle leaks.
+            if self._owns_vector:
+                try:
+                    self.vector.close()
+                except Exception:
+                    pass
+            raise
+        self._closed = False
         self.use_ripgrep = use_ripgrep
         self.user_char_limit = int(self.rules["limits"]["user_char_limit"])
         self.memory_char_limit = int(self.rules["limits"]["memory_char_limit"])
 
+    @property
+    def own_stores(self) -> Dict[str, Any]:
+        """The store handles whose lifecycle THIS builder is responsible for.
+
+        Makes the lifecycle auditable: a caller (or a test) can ask exactly
+        which connections close() will release. Injected stores belong to the
+        caller and are absent here - CortexService shares one pair of stores
+        across every request and builds a short-lived builder per request, so
+        closing an injected store would kill the running service.
+        """
+        owned: Dict[str, Any] = {}
+        if self._owns_vector:
+            owned["vector_store"] = self.vector
+        if self._owns_graph:
+            owned["graph_store"] = self.graph
+        return owned
+
     def close(self) -> None:
-        if self._owns_stores:
-            self.vector.close()
-            self.graph.close()
+        """Close every store this builder owns. Idempotent.
+
+        Each close is attempted independently: a failure closing the vector
+        store must not strand the graph connection.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        for store in (
+            getattr(self, "vector", None) if getattr(self, "_owns_vector", False) else None,
+            getattr(self, "graph", None) if getattr(self, "_owns_graph", False) else None,
+        ):
+            if store is None:
+                continue
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "ContextBuilder":
         return self

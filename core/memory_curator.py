@@ -66,18 +66,64 @@ class Curator:
         graph_store: Optional[GraphStore] = None,
     ):
         self.rules = rules or load_rules()
+        # Per-store ownership (see core/context_builder.py for the rationale):
+        # injecting exactly one store used to leave the other one unclosed.
+        self._owns_vector = vector_store is None
+        self._owns_graph = graph_store is None
         self.vector = vector_store if vector_store is not None else VectorStore(rules=self.rules)
-        self.graph = graph_store if graph_store is not None else GraphStore(rules=self.rules)
-        self._owns_stores = vector_store is None and graph_store is None
+        try:
+            self.graph = graph_store if graph_store is not None else GraphStore(rules=self.rules)
+        except Exception:
+            if self._owns_vector:
+                try:
+                    self.vector.close()
+                except Exception:
+                    pass
+            raise
+        self._closed = False
         cls = self.rules["classification"]
         self._experience_keywords = cls["experience_keywords"]
         self._knowledge_keywords = cls["knowledge_keywords"]
         self._experience_patterns = [re.compile(p) for p in cls["experience_patterns"]]
 
+    @property
+    def own_stores(self) -> Dict[str, Any]:
+        """Store handles whose lifecycle this curator is responsible for."""
+        owned: Dict[str, Any] = {}
+        if self._owns_vector:
+            owned["vector_store"] = self.vector
+        if self._owns_graph:
+            owned["graph_store"] = self.graph
+        return owned
+
     def close(self) -> None:
-        if self._owns_stores:
-            self.vector.close()
-            self.graph.close()
+        """Close every store this curator owns. Idempotent."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        for store in (
+            getattr(self, "vector", None) if getattr(self, "_owns_vector", False) else None,
+            getattr(self, "graph", None) if getattr(self, "_owns_graph", False) else None,
+        ):
+            if store is None:
+                continue
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "Curator":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     # -- classification ----------------------------------------------------
     def score_segment(self, text: str) -> Dict[str, float]:

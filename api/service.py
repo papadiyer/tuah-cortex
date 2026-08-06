@@ -58,12 +58,22 @@ class CortexService:
         self.started_at = time.time()
         self.version = SERVICE_VERSION
 
+        self._closed = False
         self._store_error: Optional[str] = None
         self.vector = None  # type: ignore[assignment]
         self.graph = None  # type: ignore[assignment]
+        self.queue = None  # type: ignore[assignment]
+        # Every handle opened by this service, recorded at construction time.
+        # close() walks THIS list, not the live attributes: a degraded service
+        # (and several tests) sets self.vector/self.graph/self.queue to None to
+        # mark a store unusable, which would otherwise strand a still-open
+        # connection that close() could no longer see.
+        self._opened: list = []
         try:
             self.vector = vector_store if vector_store is not None else VectorStore(rules=self.rules)
+            self._opened.append(self.vector)
             self.graph = graph_store if graph_store is not None else GraphStore(rules=self.rules)
+            self._opened.append(self.graph)
         except Exception as exc:
             # A store that will not open is a degraded service, not a crash:
             # /v1/health must still answer so callers can see why.
@@ -90,6 +100,7 @@ class CortexService:
                 max_attempts=int(self.service_cfg.get("queue_max_attempts", 5)),
                 rules=self.rules,
             )
+            self._opened.append(self.queue)
         except Exception as exc:
             self._store_error = "%s: %s" % (type(exc).__name__, exc)
             self.queue = None  # type: ignore[assignment]
@@ -101,12 +112,50 @@ class CortexService:
         self.max_token_budget = int(self.service_cfg.get("max_token_budget", 8192))
 
     def close(self) -> None:
-        for store in (getattr(self, "vector", None), getattr(self, "graph", None), getattr(self, "queue", None)):
+        """Close the vector store, the graph store and the queue. Idempotent.
+
+        Walks ``self._opened`` (every handle constructed for this service) as
+        well as the current attributes, so a store that was detached by setting
+        ``self.vector = None`` to mark the service degraded is still closed
+        rather than left open until garbage collection.
+
+        Each close is independent: one failing handle must not strand the rest.
+        Tolerates a partially-constructed instance so error paths can always
+        close defensively.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        seen = []
+        candidates = list(getattr(self, "_opened", []))
+        for attr in ("vector", "graph", "queue"):
+            candidates.append(getattr(self, attr, None))
+        for store in candidates:
+            if store is None or any(store is s for s in seen):
+                continue
+            seen.append(store)
             try:
-                if store is not None:
-                    store.close()
+                store.close()
             except Exception:
                 pass
+
+    @property
+    def closed(self) -> bool:
+        """True once close() has run."""
+        return self._closed
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "CortexService":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     # -- helpers -----------------------------------------------------------
     def _builder(self) -> ContextBuilder:

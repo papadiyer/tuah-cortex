@@ -51,16 +51,53 @@ class IngestWorker:
             max_attempts=int(service.get("queue_max_attempts", 5)), rules=self.rules
         )
         self._owns_queue = queue is None
-        self.curator = curator if curator is not None else Curator(rules=self.rules)
         self._owns_curator = curator is None
+        try:
+            self.curator = curator if curator is not None else Curator(rules=self.rules)
+        except Exception:
+            # The queue may already be open; do not strand it.
+            if self._owns_queue:
+                try:
+                    self.queue.close()
+                except Exception:
+                    pass
+            raise
         self.poll_seconds = float(service.get("worker_poll_seconds", 1.0))
         self._stop = False
+        self._closed = False
 
     def close(self) -> None:
-        if self._owns_curator:
-            self.curator.close()
-        if self._owns_queue:
-            self.queue.close()
+        """Close the curator/queue this worker created. Idempotent.
+
+        Injected handles belong to the caller (CortexService shares its own
+        stores and queue with the worker) and must not be closed here.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        for owned, obj in (
+            (getattr(self, "_owns_curator", False), getattr(self, "curator", None)),
+            (getattr(self, "_owns_queue", False), getattr(self, "queue", None)),
+        ):
+            if not owned or obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "IngestWorker":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     def stop(self, *_: Any) -> None:
         """Ask the follow loop to finish the current event and exit."""

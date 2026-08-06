@@ -83,6 +83,10 @@ class VectorStore:
         rules: Optional[dict] = None,
         embedder: Optional[Embedder] = None,
     ):
+        # Set before anything that can fail so close()/__del__ stay safe even
+        # if construction aborts part-way (e.g. a bad path or a mixed store).
+        self._closed = False
+        self.conn = None  # type: ignore[assignment]
         self.rules = rules or load_rules()
         self.embedder = embedder if embedder is not None else get_embedder(self.rules)
         if db_path is None:
@@ -103,11 +107,49 @@ class VectorStore:
         # Capture the store's embedding identity from existing rows so add()
         # and query() can enforce it without a full table scan per call. A
         # mixed store (pre-existing corruption) fails loud at open.
-        self._store_identity = self._scan_identity()
+        try:
+            self._store_identity = self._scan_identity()
+        except Exception:
+            # The store is unusable, but the connection is already open. Close
+            # it before propagating, or a caller that correctly handles the
+            # ValueError still leaks the handle it never got a reference to.
+            self.close()
+            raise
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
-        self.conn.close()
+        """Close the SQLite connection. Idempotent and safe to call twice.
+
+        The connection object is deliberately kept (not set to None) so that
+        using a closed store raises sqlite3.ProgrammingError - a clear "you
+        used this after closing it" - rather than AttributeError.
+
+        Tolerates a partially-constructed instance (``__init__`` raised before
+        the attributes existed), so error paths can always close defensively.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            conn.close()
+
+    @property
+    def closed(self) -> bool:
+        """True once close() has run. Lets callers audit lifecycle state."""
+        return self._closed
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort safety net: never raise, never mask a real leak.
+
+        This exists so a store dropped without close() does not emit a
+        ResourceWarning at GC time. It is a backstop, NOT the contract -
+        callers must still close explicitly (or use the context manager).
+        """
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "VectorStore":
         return self

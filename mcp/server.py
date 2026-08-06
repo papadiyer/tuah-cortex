@@ -172,8 +172,26 @@ class MCPServer:
         return self._service
 
     def close(self) -> None:
+        """Close the service if this server created it. Idempotent.
+
+        An injected service belongs to the caller (tests, the CLI) and is left
+        alone; closing it would tear down stores the caller still uses.
+        """
         if self._owns_service and self._service is not None:
             self._service.close()
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "MCPServer":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     # -- tools -------------------------------------------------------------
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:

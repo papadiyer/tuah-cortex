@@ -91,6 +91,10 @@ class GraphStore:
     """Relational/code-graph memory with a ripgrep fallback."""
 
     def __init__(self, db_path: Optional[str] = None, rules: Optional[dict] = None):
+        # Set before anything that can fail so close()/__del__ stay safe even
+        # if construction aborts part-way.
+        self._closed = False
+        self.conn = None  # type: ignore[assignment]
         self.rules = rules or load_rules()
         if db_path is None:
             db_path = repo_path(self.rules["paths"]["graph_db"])
@@ -108,7 +112,32 @@ class GraphStore:
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
-        self.conn.close()
+        """Close the SQLite connection. Idempotent and safe to call twice.
+
+        The connection object is kept (not set to None) so use-after-close
+        raises sqlite3.ProgrammingError rather than AttributeError.
+
+        Tolerates a partially-constructed instance (``__init__`` raised before
+        the attributes existed), so error paths can always close defensively.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            conn.close()
+
+    @property
+    def closed(self) -> bool:
+        """True once close() has run. Lets callers audit lifecycle state."""
+        return self._closed
+
+    def __del__(self) -> None:  # pragma: no cover - GC timing dependent
+        """Best-effort backstop against a GC-time ResourceWarning."""
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "GraphStore":
         return self
