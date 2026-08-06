@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(rm -rf *)",
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git merge *)",
+      "Bash(git commit *)",
+      "Bash(docker *)",
+      "Bash(kubectl *)"
+    ],
+    "allow": [
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(python3 *)",
+      "Bash(python3 -m unittest *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Bash(touch *)",
+      "Bash(bash run_cortex.sh *)",
+      "Bash(rg *)",
+      "Read(//Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/**)",
+      "Edit(//Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/**)",
+      "Write(//Users/faisal/dev/projects/the-magnificent-5/jebat-cortex/**)"
+    ]
+  }
+}

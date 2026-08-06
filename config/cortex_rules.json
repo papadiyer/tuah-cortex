@@ -1,0 +1,55 @@
+{
+  "version": "0.1",
+  "limits": {
+    "user_char_limit": 1375,
+    "memory_char_limit": 2200
+  },
+  "retrieval": {
+    "vector_top_k": 5,
+    "graph_top_k": 5,
+    "min_score": 0.02,
+    "merged_max_items": 12
+  },
+  "curator": {
+    "min_segment_chars": 16,
+    "max_segment_chars": 600,
+    "skip_roles": [],
+    "classification_margin": 0.0
+  },
+  "embedding": {
+    "dimensions": 512,
+    "ngram_size": 4,
+    "ngram_weight": 0.35
+  },
+  "classification": {
+    "experience_keywords": [
+      "file", "files", "folder", "directory", "path", "module", "package",
+      "import", "imports", "dependency", "dependencies", "architecture",
+      "repo", "repository", "codebase", "function", "class", "method",
+      "schema", "migration", "endpoint", "api", "commit", "branch",
+      "refactor", "test", "tests", "script", "build", "pipeline", "sqlite",
+      "database table", "structure", "call", "calls", "wired", "wires"
+    ],
+    "knowledge_keywords": [
+      "prefer", "prefers", "preference", "preferences", "likes", "dislikes",
+      "always", "never", "rule", "rules", "policy", "config", "setting",
+      "settings", "limit", "budget", "decision", "decided", "standard",
+      "convention", "requirement", "fact", "remember", "note", "goal",
+      "deadline", "owner", "authority", "language", "timezone"
+    ],
+    "experience_patterns": [
+      "(?m)^\\s*(?:from|import)\\s+[A-Za-z_][\\w.]*",
+      "[\\w./-]+\\.(?:py|js|ts|tsx|json|sh|md|ya?ml|toml|sql|txt)\\b",
+      "```",
+      "(?:^|\\s)(?:/|\\./|~/)[\\w./-]+",
+      "\\bdef\\s+\\w+\\s*\\(",
+      "\\bclass\\s+\\w+\\s*[:(]"
+    ]
+  },
+  "paths": {
+    "data_dir": "data",
+    "vector_db": "data/vector_store.db",
+    "graph_db": "data/graph_store.db",
+    "sample_log": "data/sample_conversation.jsonl"
+  }
+}

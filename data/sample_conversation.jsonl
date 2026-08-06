@@ -1,0 +1,8 @@
+{"role": "user", "ts": "2026-08-06T09:00:00Z", "content": "I prefer short, direct answers. Never claim success without test evidence."}
+{"role": "assistant", "ts": "2026-08-06T09:00:30Z", "content": "Understood. core/context_builder.py imports core/vector_store.py and core/graph_store.py to merge both memory types."}
+{"role": "user", "ts": "2026-08-06T09:01:00Z", "content": "The memory_char_limit is 2200 and the user_char_limit is 1375. Those are hard limits, never exceed them."}
+{"role": "assistant", "ts": "2026-08-06T09:01:40Z", "content": "core/memory_curator.py writes to data/vector_store.db for knowledge and data/graph_store.db for experience."}
+{"role": "user", "ts": "2026-08-06T09:02:10Z", "content": "My timezone is Asia/Kuala_Lumpur and Faisal is the final approval authority for any deploy."}
+{"role": "assistant", "ts": "2026-08-06T09:02:50Z", "content": "tests/test_context_builder.py tests core/context_builder.py budget enforcement."}
+{"role": "user", "ts": "2026-08-06T09:03:20Z", "content": "Config rule: retrieval top_k stays at 5 for both stores until we benchmark it."}
+{"role": "assistant", "ts": "2026-08-06T09:04:00Z", "content": "The vector store depends on sqlite3 from the standard library; no external vector database is required."}

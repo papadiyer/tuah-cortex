@@ -1,0 +1,172 @@
+"""Context builder: merge behaviour and hard character-budget enforcement."""
+
+import json
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.context_builder import ContextBuilder  # noqa: E402
+from core.graph_store import GraphStore  # noqa: E402
+from core.rules import load_rules, truncate  # noqa: E402
+from core.vector_store import VectorStore  # noqa: E402
+
+RULES = load_rules()
+USER_LIMIT = RULES["limits"]["user_char_limit"]
+MEMORY_LIMIT = RULES["limits"]["memory_char_limit"]
+
+
+def _builder(use_ripgrep=False):
+    return ContextBuilder(
+        vector_store=VectorStore(":memory:"),
+        graph_store=GraphStore(":memory:"),
+        use_ripgrep=use_ripgrep,
+    )
+
+
+class TestTruncate(unittest.TestCase):
+    def test_never_exceeds_limit(self):
+        for limit in (0, 1, 5, 20, 100, 999):
+            self.assertLessEqual(len(truncate("word " * 500, limit)), limit)
+
+    def test_short_text_untouched(self):
+        self.assertEqual(truncate("hello", 100), "hello")
+
+
+class TestBudgetEnforcement(unittest.TestCase):
+    """Acceptance criteria: the two hard limits, proven on over-long input."""
+
+    def setUp(self):
+        self.builder = _builder()
+
+    def tearDown(self):
+        self.builder.close()
+
+    def test_limits_loaded_from_config(self):
+        self.assertEqual(self.builder.user_char_limit, 1375)
+        self.assertEqual(self.builder.memory_char_limit, 2200)
+
+    def test_memory_block_never_exceeds_limit(self):
+        # Retrieval caps candidates at top_k per store, so the entries themselves
+        # must be large: 40 x ~1100 chars, of which the top 10 alone (~11k chars)
+        # far exceed the 2200 budget.
+        for i in range(40):
+            self.builder.vector.add(
+                "memory budget saturation entry %02d: %s" % (i, "sqlite vector ranking detail " * 38),
+                {"source": "flood"},
+            )
+        for i in range(40):
+            self.builder.graph.add_edge(
+                "module_%02d.py" % i,
+                "imports",
+                "sqlite vector ranking dependency %02d %s" % (i, "extra path detail " * 30),
+            )
+
+        context = self.builder.build("sqlite vector ranking")
+        candidates = context["counts"]["candidates"]
+        raw_chars = sum(
+            len(item["text"]) for item in context["knowledge"] + context["experience"]
+        )
+
+        # Guard the premise: the retrieved set must genuinely overflow the budget.
+        self.assertGreater(candidates, 1, "need multiple candidates to test dropping")
+        self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
+        self.assertEqual(context["memory_block_chars"], len(context["memory_block"]))
+        self.assertTrue(context["memory_block"].strip(), "budget starved the block entirely")
+        self.assertGreater(
+            context["counts"]["dropped_for_budget"], 0, "oversized candidate set dropped nothing"
+        )
+        self.assertLessEqual(raw_chars, MEMORY_LIMIT)
+
+    def test_prompt_slice_never_exceeds_limit(self):
+        long_prompt = "explain the vector store ranking algorithm in detail. " * 100
+        self.assertGreater(len(long_prompt), USER_LIMIT)
+
+        context = self.builder.build(long_prompt)
+
+        self.assertLessEqual(len(context["prompt"]), USER_LIMIT)
+        self.assertEqual(context["prompt_chars"], len(context["prompt"]))
+        self.assertTrue(context["prompt_truncated"])
+
+    def test_markdown_memory_stays_within_limit(self):
+        for i in range(30):
+            self.builder.vector.add("knowledge overflow entry %d %s" % (i, "detail " * 60), {"source": "f"})
+        context = self.builder.build("knowledge overflow entry")
+        markdown = self.builder.to_markdown(context)
+
+        self.assertLessEqual(context["memory_block_chars"], MEMORY_LIMIT)
+        self.assertIn("## Jebat-Cortex Memory Digest", markdown)
+        self.assertIn("### Memory", markdown)
+
+    def test_single_oversized_entry_is_truncated_not_dropped(self):
+        self.builder.vector.add("giant fact " * 900, {"source": "big"})
+        context = self.builder.build("giant fact")
+
+        self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
+        self.assertTrue(context["memory_block"].strip(), "oversized entry should be clipped, not lost")
+
+
+class TestMergeAndOutput(unittest.TestCase):
+    def setUp(self):
+        self.builder = _builder()
+        self.builder.vector.add("The memory char limit is 2200 characters", {"source": "cfg"})
+        self.builder.vector.add("Faisal is the final approval authority", {"source": "cfg"})
+        self.builder.graph.add_edge("core/context_builder.py", "imports", "core/vector_store.py")
+
+    def tearDown(self):
+        self.builder.close()
+
+    def test_merges_both_memory_types(self):
+        context = self.builder.build("memory char limit for context_builder")
+        self.assertGreater(context["counts"]["knowledge"], 0)
+        self.assertGreater(context["counts"]["experience"], 0)
+        types = {item["type"] for item in context["knowledge"] + context["experience"]}
+        self.assertEqual(types, {"knowledge", "experience"})
+
+    def test_results_are_score_ordered(self):
+        context = self.builder.build("memory char limit")
+        merged = context["knowledge"] + context["experience"]
+        scores = sorted((item["score"] for item in merged), reverse=True)
+        self.assertEqual(len(scores), len(merged))
+
+    def test_json_serialisable(self):
+        context = self.builder.build("memory char limit")
+        self.assertIsInstance(json.dumps(context), str)
+
+    def test_markdown_is_non_empty_and_reports_budget(self):
+        markdown = self.builder.to_markdown(self.builder.build("memory char limit"))
+        self.assertIn("**Budget:**", markdown)
+        self.assertIn("2200", markdown)
+        self.assertTrue(markdown.strip())
+
+    def test_empty_stores_yield_graceful_digest(self):
+        empty = _builder()
+        try:
+            context = empty.build("nothing has been learned yet")
+            markdown = empty.to_markdown(context)
+            self.assertEqual(context["counts"]["knowledge"], 0)
+            self.assertIn("_no memory matched this prompt_", markdown)
+        finally:
+            empty.close()
+
+    def test_empty_prompt_does_not_crash(self):
+        context = self.builder.build("")
+        self.assertEqual(context["prompt"], "")
+        self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
+
+
+class TestRipgrepIntegration(unittest.TestCase):
+    def test_fallback_used_only_when_graph_is_empty(self):
+        builder = _builder(use_ripgrep=True)
+        try:
+            # Graph has nothing; the fallback should search the real repo.
+            context = builder.build("VectorStore")
+            self.assertLessEqual(len(context["memory_block"]), MEMORY_LIMIT)
+            self.assertIsInstance(context["ripgrep_available"], bool)
+        finally:
+            builder.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

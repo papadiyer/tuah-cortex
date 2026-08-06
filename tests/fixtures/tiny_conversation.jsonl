@@ -1,0 +1,7 @@
+{"role": "user", "content": "I prefer concise answers and I always want tests before any claim of success.", "ts": "2026-08-06T09:00:00Z"}
+{"role": "assistant", "content": "core/context_builder.py imports core/vector_store.py to rank semantic memory.", "ts": "2026-08-06T09:00:30Z"}
+{"role": "user", "content": "The memory_char_limit is 2200 and that is a hard rule for every prompt.", "ts": "2026-08-06T09:01:00Z"}
+{"role": "assistant", "content": "core/memory_curator.py writes to data/graph_store.db for structural facts.", "ts": "2026-08-06T09:01:30Z"}
+{"role": "user", "content": "My timezone is Asia/Kuala_Lumpur.", "ts": "2026-08-06T09:02:00Z"}
+this line is deliberately not valid json
+{"role": "user", "content": "short", "ts": "2026-08-06T09:03:00Z"}

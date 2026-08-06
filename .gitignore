@@ -1,0 +1,5 @@
+.m5/
+__pycache__/
+*.pyc
+*.db
+.DS_Store
