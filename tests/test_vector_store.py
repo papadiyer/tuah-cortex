@@ -182,8 +182,9 @@ class TestBackendMismatchIsNotSilent(unittest.TestCase):
         import json as _json
 
         tag = _json.loads(row[0])
-        self.assertEqual(tag["backend"], "deterministic")
-        self.assertEqual(tag["dim"], store_dims(self.rules))
+        # v1.1 ships the semantic backend as default; rows are tagged accordingly.
+        self.assertEqual(tag["backend"], "sentence-transformers")
+        self.assertEqual(tag["dim"], 384)
         self.assertIn("model", tag, "embed_meta must carry model identity")
 
     def test_same_dimension_different_model_is_skipped_in_query(self):
@@ -234,7 +235,8 @@ class TestBackendMismatchIsNotSilent(unittest.TestCase):
 
 
 def store_dims(rules):
-    return int(rules["embedding"]["dimensions"])
+    emb = rules["embedding"]
+    return int(emb.get("dimensions", emb.get("fallback_dimensions", 512)))
 
 
 if __name__ == "__main__":

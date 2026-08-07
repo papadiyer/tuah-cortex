@@ -7,7 +7,7 @@
   "retrieval": {
     "vector_top_k": 5,
     "graph_top_k": 5,
-    "min_score": 0.02,
+    "min_score": 0.42,
     "merged_max_items": 12,
     "expert_top_k": 5,
     "expert_boost": 1.0
@@ -19,10 +19,12 @@
     "classification_margin": 0.0
   },
   "embedding": {
-    "backend": "deterministic",
-    "dimensions": 512,
-    "ngram_size": 4,
-    "ngram_weight": 0.35
+    "backend": "sentence-transformers",
+    "model": "paraphrase-multilingual-MiniLM-L12-v2",
+    "note": "Semantic backend (v1.1). Multilingual (EN+MS). Runs under .venv-cortex-st (Python 3.11); system python3 3.9 cannot import sentence-transformers. get_embedder fails loud if this backend is configured but unavailable.",
+    "fallback_dimensions": 512,
+    "fallback_ngram_size": 4,
+    "fallback_ngram_weight": 0.35
   },
   "classification": {
     "experience_keywords": [

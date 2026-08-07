@@ -16,6 +16,7 @@ from core.rules import (  # noqa: E402
     Embedder,
     EmbedderUnavailableError,
     SentenceTransformerEmbedder,
+    SENTENCE_TRANSFORMERS_BACKEND,
     cosine,
     embed,
     get_embedder,
@@ -44,7 +45,10 @@ class TestDeterministicEmbedder(unittest.TestCase):
 
     def test_dimensions_matches_config(self):
         embedder = DeterministicEmbedder(self.rules)
-        self.assertEqual(embedder.dimensions, int(self.rules["embedding"]["dimensions"]))
+        # Deterministic is now the opt-in fallback; its dims come from
+        # fallback_dimensions (the lexical `dimensions` key was removed on flip).
+        dim_key = "dimensions" if "dimensions" in self.rules["embedding"] else "fallback_dimensions"
+        self.assertEqual(embedder.dimensions, int(self.rules["embedding"][dim_key]))
         self.assertEqual(len(embedder.embed("anything")), embedder.dimensions)
 
     def test_is_an_embedder_and_callable(self):
@@ -67,12 +71,13 @@ class TestGetEmbedder(unittest.TestCase):
     def setUp(self):
         self.rules = copy.deepcopy(load_rules())
 
-    def test_defaults_to_deterministic(self):
-        self.assertIsInstance(get_embedder(self.rules), DeterministicEmbedder)
+    def test_defaults_to_semantic_when_configured(self):
+        # v1.1 ships the semantic backend as the default; get_embedder returns it.
+        self.assertIsInstance(get_embedder(self.rules), SentenceTransformerEmbedder)
 
-    def test_config_ships_deterministic_backend(self):
+    def test_config_ships_semantic_backend(self):
         self.assertEqual(
-            load_rules()["embedding"].get("backend"), DEFAULT_BACKEND
+            load_rules()["embedding"].get("backend"), SENTENCE_TRANSFORMERS_BACKEND
         )
 
     def test_missing_backend_key_still_deterministic(self):
@@ -84,14 +89,21 @@ class TestGetEmbedder(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_embedder(self.rules)
 
-    def test_sentence_transformers_backend_degrades_when_absent(self):
-        """Requesting an unavailable backend warns and falls back - never crashes."""
-        self.rules["embedding"]["backend"] = "sentence-transformers"
-        if sentence_transformers_available():
-            self.skipTest("sentence-transformers is installed on this host")
+    def test_semantic_backend_fails_loud_on_unloadable_model(self):
+        """A configured semantic backend whose model cannot load must RAISE,
+        not silently degrade to lexical (P1 fail-loud)."""
+        bad = copy.deepcopy(self.rules)
+        bad["embedding"]["model"] = "this-model-does-not-exist-xyz"
+        with self.assertRaises(EmbedderUnavailableError):
+            get_embedder(bad, allow_fallback=False)
+
+    def test_semantic_backend_degrades_only_when_explicitly_allowed(self):
+        """Opt-in degrade path still works for dev boxes without the model."""
+        bad = copy.deepcopy(self.rules)
+        bad["embedding"]["model"] = "this-model-does-not-exist-xyz"
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            embedder = get_embedder(self.rules)
+            embedder = get_embedder(bad, allow_fallback=True)
         self.assertIsInstance(embedder, DeterministicEmbedder)
         self.assertTrue(
             any("sentence-transformers" in str(w.message) for w in caught),
@@ -101,7 +113,13 @@ class TestGetEmbedder(unittest.TestCase):
 
 class TestSentenceTransformerLaziness(unittest.TestCase):
     def test_module_imports_without_the_package(self):
-        """core.rules must import cleanly on a host with no sentence-transformers."""
+        """core.rules must import cleanly on a host with no sentence-transformers.
+
+        On a host where ST IS installed (our venv), skip - the assertion about
+        absence cannot hold.
+        """
+        if sentence_transformers_available():
+            self.skipTest("sentence-transformers is installed on this host")
         self.assertNotIn("sentence_transformers", sys.modules)
         self.assertTrue(hasattr(rules_module, "SentenceTransformerEmbedder"))
 
@@ -136,10 +154,10 @@ class _StubEmbedder(Embedder):
 
 
 class TestVectorStoreEmbedderInjection(unittest.TestCase):
-    def test_defaults_to_deterministic_embedder(self):
+    def test_defaults_to_semantic_embedder(self):
         store = VectorStore(":memory:")
         try:
-            self.assertIsInstance(store.embedder, DeterministicEmbedder)
+            self.assertIsInstance(store.embedder, SentenceTransformerEmbedder)
         finally:
             store.close()
 

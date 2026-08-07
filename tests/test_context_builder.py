@@ -107,6 +107,10 @@ class TestBudgetEnforcement(unittest.TestCase):
         self.assertIn("### Memory", markdown)
 
     def test_single_oversized_entry_is_truncated_not_dropped(self):
+        # Mechanics test: disable the semantic min_score floor so synthetic text
+        # is retrievable regardless of embedding quality (recall quality is its
+        # own concern, covered by the golden-set eval).
+        self.builder.vector.rules["retrieval"]["min_score"] = 0.0
         self.builder.vector.add("giant fact " * 900, {"source": "big"})
         context = self.builder.build("giant fact")
 

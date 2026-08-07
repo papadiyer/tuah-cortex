@@ -137,7 +137,8 @@ class TestTools(MCPTestCase):
     def test_health_returns_healthy(self):
         payload = self._payload(self._call("cortex.health"))
         self.assertEqual(payload["status"], "healthy")
-        self.assertEqual(payload["identity"]["backend"], "deterministic")
+        # v1.1 ships the semantic backend as default.
+        self.assertEqual(payload["identity"]["backend"], "sentence-transformers")
 
     def test_build_context_returns_digest(self):
         payload = self._payload(self._call("cortex.build_context", {"prompt": "how does ranking work?"}))

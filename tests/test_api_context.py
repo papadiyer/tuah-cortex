@@ -140,6 +140,9 @@ class TestBudget(ContextTestCase):
 
     def test_budget_is_enforced_on_flooded_store(self):
         self._flood()
+        # Mechanics test: disable the semantic min_score floor so synthetic
+        # entries are retrievable regardless of embedding quality.
+        self.vector.rules["retrieval"]["min_score"] = 0.0
         _, body = self._build(token_budget=200)
         self.assertLessEqual(body["memory_char_budget"], 800)
         self.assertGreater(body["counts"]["dropped_for_budget"], 0)

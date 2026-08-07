@@ -16,5 +16,9 @@ data/hermes_export.jsonl
 # Local Graphify knowledge-graph output (generated, not source)
 graphify-out/
 
-# Python virtualenv for graphify (isolated install, per Faisal directive)
-.venv-graphify/
+# Python virtualenv for the semantic embedder (sentence-transformers, 3.11).
+# Built per-host via the Proxmox runbook; never commit (env-specific, 470MB+ model).
+.venv-cortex-st/
+
+# Lexical->semantic migration backup of the old vector store (local artifact).
+*.bak

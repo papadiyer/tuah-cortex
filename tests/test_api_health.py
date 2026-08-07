@@ -55,8 +55,9 @@ class TestHealth(AppTestCase):
 
     def test_health_reports_embedding_identity(self):
         _, body = self.app.dispatch("GET", "/v1/health")
-        self.assertEqual(body["identity"]["backend"], "deterministic")
-        self.assertEqual(body["identity"]["dim"], 512)
+        # v1.1 ships the semantic backend as default.
+        self.assertEqual(body["identity"]["backend"], "sentence-transformers")
+        self.assertEqual(body["identity"]["dim"], 384)
 
     def test_version_matches_service_version(self):
         _, body = self.app.dispatch("GET", "/v1/health")

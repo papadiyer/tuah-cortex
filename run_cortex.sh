@@ -17,6 +17,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 PYTHON="${PYTHON:-python3}"
+# Prefer the semantic-embedder venv when present: it carries sentence-transformers
+# (CPU build) on a 3.11 interpreter, which the system python3 (3.9) cannot import.
+# Cortex runs correctly under either, but the semantic backend ONLY imports from
+# this venv. On a clean box without the venv, fall back to python3 (lexical mode
+# still works; get_embedder fails loud if semantic is explicitly configured).
+if [[ -x "$REPO_ROOT/.venv-cortex-st/bin/python" ]]; then
+  PYTHON="$REPO_ROOT/.venv-cortex-st/bin/python"
+fi
 SAMPLE_LOG="data/sample_conversation.jsonl"
 HERMES_DB="${HERMES_DB:-$HOME/.hermes/state.db}"
 HERMES_EXPORT="data/hermes_export.jsonl"

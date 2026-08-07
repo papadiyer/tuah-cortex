@@ -158,9 +158,13 @@ class DeterministicEmbedder(Embedder):
     def __init__(self, rules: Optional[dict] = None):
         self.rules = rules or load_rules()
         cfg = self.rules["embedding"]
-        self._dimensions = int(cfg["dimensions"])
-        self._ngram_size = int(cfg["ngram_size"])
-        self._ngram_weight = float(cfg["ngram_weight"])
+        # When the active backend is semantic, the lexical `dimensions`/`ngram_*`
+        # keys are absent. The deterministic embedder is still used as an explicit
+        # opt-in fallback (allow_fallback=True) on boxes without sentence-transformers,
+        # so it must read fallback_* keys instead of crashing on a missing key.
+        self._dimensions = int(cfg.get("dimensions", cfg.get("fallback_dimensions", 512)))
+        self._ngram_size = int(cfg.get("ngram_size", cfg.get("fallback_ngram_size", 4)))
+        self._ngram_weight = float(cfg.get("ngram_weight", cfg.get("fallback_ngram_weight", 0.35)))
 
     @property
     def dimensions(self) -> int:
@@ -251,11 +255,18 @@ def sentence_transformers_available() -> bool:
 def get_embedder(rules: Optional[dict] = None, **kwargs: Any) -> Embedder:
     """Factory: the backend named in ``embedding.backend``, else deterministic.
 
-    Falls back to the deterministic backend (with a warning, not a crash) when
-    sentence-transformers is requested but unusable, so a config change on a
-    machine without the package degrades instead of breaking the pipeline.
+    When ``embedding.backend`` is explicitly ``sentence-transformers`` but the
+    package or model is unavailable, this RAISES (fail-loud) instead of silently
+    degrading to the deterministic embedder. A GA runtime must not boot "healthy"
+    while actually serving lexical recall it was configured to replace — that is a
+    silent-intelligence failure. The deterministic backend remains the default and
+    is still selected when ``backend`` is unset/empty/local/hashed.
+
+    To opt back into the old degrade-on-failure behaviour (e.g. for a dev box
+    without the model), pass ``allow_fallback=True``.
     """
     rules = rules or load_rules()
+    allow_fallback = bool(kwargs.pop("allow_fallback", False))
     backend = str(rules["embedding"].get("backend", DEFAULT_BACKEND)).strip().lower()
 
     if backend in (DEFAULT_BACKEND, "", "local", "hashed"):
@@ -268,12 +279,15 @@ def get_embedder(rules: Optional[dict] = None, **kwargs: Any) -> Embedder:
         try:
             return SentenceTransformerEmbedder(model_name, rules=rules)
         except EmbedderUnavailableError as exc:
-            warnings.warn(
-                "%s - falling back to the %s embedder" % (exc, DEFAULT_BACKEND),
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            return DeterministicEmbedder(rules)
+            if allow_fallback:
+                warnings.warn(
+                    "%s - falling back to the %s embedder" % (exc, DEFAULT_BACKEND),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return DeterministicEmbedder(rules)
+            # Configured for semantic but cannot serve it: fail loud, never lie.
+            raise
 
     raise ValueError(
         "unknown embedding backend %r (expected %r or %r)"

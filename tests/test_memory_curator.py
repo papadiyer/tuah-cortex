@@ -132,6 +132,9 @@ class TestLogReading(unittest.TestCase):
 class TestIngest(unittest.TestCase):
     def test_ingest_routes_into_both_stores(self):
         vector = VectorStore(":memory:")
+        # Mechanics test: disable the semantic min_score floor so the synthetic
+        # fixture is retrievable regardless of embedding quality.
+        vector.rules["retrieval"]["min_score"] = 0.0
         graph = GraphStore(":memory:")
         curator = Curator(vector_store=vector, graph_store=graph)
         try:
