@@ -1,4 +1,4 @@
-# API Contracts — Jebat-Cortex Cognitive Runtime (RC1 / v0.4)
+# API Contracts — Jebat-Cortex Cognitive Runtime (GA / v1.0.0)
 
 Design doc for Task2 Workstream 2. Defines the HTTP surface Tuah and other
 clients use. All endpoints bind to `127.0.0.1:8765` by default (localhost-only).

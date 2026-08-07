@@ -27,8 +27,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_RULES_PATH = os.path.join(REPO_ROOT, "config", "cortex_rules.json")
 DEFAULT_IDENTITY_PATH = os.path.join(REPO_ROOT, "config", "identity.json")
 
-# Runtime version reported by /v1/health and the MCP surface (RC1 / v0.4).
-SERVICE_VERSION = "0.4.0"
+# Runtime version reported by /v1/health and the MCP surface (GA / v1.0.0).
+SERVICE_VERSION = "1.0.0"
 
 _TOKEN_RE = re.compile(r"[a-z0-9_./-]+")
 

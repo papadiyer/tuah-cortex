@@ -1,4 +1,4 @@
-# MCP Surface — Jebat-Cortex (RC1 / v0.4)
+# MCP Surface — Jebat-Cortex (GA / v1.0.0)
 
 Design doc for Task2 Workstream 6. Exposes Cortex as a **local stdio MCP server**
 so Jebat, Lekiu, Claude Code and Codex can pull memory/context directly. Tuah's

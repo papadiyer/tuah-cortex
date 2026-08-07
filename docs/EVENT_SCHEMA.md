@@ -1,4 +1,4 @@
-# Event Schema & Durable Queue — Jebat-Cortex (RC1 / v0.4)
+# Event Schema & Durable Queue — Jebat-Cortex (GA / v1.0.0)
 
 Design doc for Task2 Workstream 5 (Durable Event Queue) and the postflight
 half of Workstream 2. The queue is **SQLite-backed** (already a dependency) —

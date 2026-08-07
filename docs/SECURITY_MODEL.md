@@ -1,4 +1,4 @@
-# Security Model — Jebat-Cortex (RC1 / v0.4)
+# Security Model — Jebat-Cortex (GA / v1.0.0)
 
 Defines the security posture for the cognitive runtime. RC1 scope only.
 

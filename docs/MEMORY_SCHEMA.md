@@ -1,4 +1,4 @@
-# Memory Schema — Provenance, Status, Tiers (RC1 / v0.4)
+# Memory Schema — Provenance, Status, Tiers (GA / v1.0.0)
 
 Design doc for Task2 Workstream 3 (Memory Policy / tiers) and Workstream 4
 (Provenance and Memory Status). Extends the existing vector/graph stores

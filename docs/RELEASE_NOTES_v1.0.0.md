@@ -1,9 +1,11 @@
-# RELEASE NOTES — Jebat-Cortex v0.4.0 (RC1)
+# RELEASE NOTES — Jebat-Cortex v0.4.0 → v1.0.0 (GA)
 
-**Status:** RC1 — frozen pending Faisal sign-off. All RC1 findings (2 High,
-1 Medium, 1 Low) resolved and independently verified by Codex + Jebat.
+**Status:** GA — released. All RC1 findings (2 High, 1 Medium, 1 Low) were
+resolved and independently verified by Codex + Jebat; the runtime has since
+proven correct behaviour superseding the default Hermes memory layer, and is
+signed off for general availability by Faisal (final approval authority).
 
-## What's in RC1
+## What's in v1.0.0 (GA)
 
 Transforms Jebat-Cortex from a standalone CLI pipeline into a **persistent local
 cognitive runtime** for M5 (Task2).
@@ -63,6 +65,20 @@ python3 -m mcp.server
 > define two jobs (serve + worker), or use a wrapper. This is by design for
 > clean shutdown; document it in SERVICE_OPERATIONS before GA.
 
+## GA sign-off (v1.0.0)
+
+- RC1 froze after all 4 findings resolved + independent Codex/Jebat verification.
+- Post-RC1, the runtime demonstrated correct behaviour that **supersedes the
+  default Hermes memory layer** for Jebat's working context (verified by Faisal
+  through live use).
+- v0.5 Expert-Axis Routing (Mixture-of-Experts at the memory/persona layer)
+  shipped on top of RC1 and passed full verification: 376 tests green, zero
+  ResourceWarning, embedding-identity guard intact, Hermes `state.db` read-only,
+  config-only tunability proven, golden-set eval showing routed retrieval beats
+  global.
+- Faisal (final approval authority) signed off RC1 → GA.
+
 ## Commits
 Phase 1 assessment + Phase 2 design → `9b25091`. Phase 3 runtime + Phase 3.1
-blockers + Phase 3.2 follow-up + this release → RC1 tag.
+blockers + Phase 3.2 follow-up → RC1. v0.5 Expert-Axis Routing → `18d7930`.
+GA sign-off → this commit.

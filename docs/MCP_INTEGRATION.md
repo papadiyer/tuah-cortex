@@ -1,4 +1,4 @@
-# MCP Integration — Jebat-Cortex (RC1 / v0.4)
+# MCP Integration — Jebat-Cortex (GA / v1.0.0)
 
 How to connect Claude Code, Codex or any stdio MCP client to Cortex memory.
 This is the user-facing version of `docs/MCP_SURFACE.md`.

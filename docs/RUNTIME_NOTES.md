@@ -1,4 +1,4 @@
-# Runtime Notes — Phase 3 (RC1 / v0.4)
+# Runtime Notes — Phase 3 (GA / v1.0.0)
 
 Implementation notes for the cognitive runtime. Records the environment facts
 and the deviations from the Phase 2 design docs, with the reason for each.
