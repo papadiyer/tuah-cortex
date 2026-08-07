@@ -8,7 +8,9 @@
     "vector_top_k": 5,
     "graph_top_k": 5,
     "min_score": 0.02,
-    "merged_max_items": 12
+    "merged_max_items": 12,
+    "expert_top_k": 5,
+    "expert_boost": 1.0
   },
   "curator": {
     "min_segment_chars": 16,
@@ -46,6 +48,53 @@
       "\\bdef\\s+\\w+\\s*\\(",
       "\\bclass\\s+\\w+\\s*[:(]"
     ]
+  },
+  "expert_axes": {
+    "_comment": "Mixture-of-Experts at the memory layer (docs/EXPERT_AXIS_ROUTING_v0.5.md). Adding an axis here + in identity.json persona.expert_axes routes and tags it with NO code change. Weights baselined on tests/golden/expert_routing.jsonl, not guessed.",
+    "default_weight": 0.0,
+    "min_confidence": 0.3,
+    "saturation": 1.0,
+    "axes": {
+      "telco_presales": {
+        "keywords": [
+          "proposal", "sla", "5g", "private network", "boq", "rfi", "rfp",
+          "presales", "customer", "commercial", "ran", "core network",
+          "tender", "bandwidth"
+        ],
+        "weight": 1.0
+      },
+      "linux_pro": {
+        "keywords": [
+          "proxmox", "zfs", "ssh", "systemd", "debian", "ubuntu", "fstab",
+          "cron", "iptables", "firewall", "lvm", "kernel", "daemon",
+          "journalctl", "mount", "swap"
+        ],
+        "weight": 1.0
+      },
+      "technologist": {
+        "keywords": [
+          "api", "architecture", "model", "inference", "vector", "embedding",
+          "rag", "docker", "kubernetes", "gpu", "token", "latency"
+        ],
+        "weight": 0.8
+      },
+      "cto": {
+        "keywords": [
+          "trade-off", "tradeoff", "build vs buy", "buy vs build", "governance",
+          "architecture decision", "tech debt", "roadmap", "postmortem"
+        ],
+        "weight": 1.0,
+        "experience_only": true
+      },
+      "founder": {
+        "keywords": [
+          "gtm", "burn rate", "pricing", "mvp", "product-market", "hire",
+          "hiring", "funding", "pivot", "unit economics", "runway"
+        ],
+        "weight": 1.0,
+        "experience_only": true
+      }
+    }
   },
   "paths": {
     "data_dir": "data",

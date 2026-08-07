@@ -321,6 +321,106 @@ def keyword_overlap(text: str, keywords: Iterable[str]) -> int:
     return hits
 
 
+def load_json_blob(raw: Any, expected: type) -> Any:
+    """Decode a stored JSON blob, or return an empty value of ``expected``.
+
+    A corrupt or NULL blob degrades to the empty list/dict rather than raising:
+    a malformed expert tag must not make an otherwise good memory unreadable.
+    """
+    if raw:
+        try:
+            value = json.loads(raw)
+            if isinstance(value, expected):
+                return value
+        except (TypeError, ValueError):
+            pass
+    return expected()
+
+
+def experts_clause(axes: Any, column: str = "experts") -> "tuple":
+    """SQL fragment matching rows tagged with ANY of ``axes``. ('', []) if none.
+
+    ``experts`` is stored as a JSON list, so membership is a LIKE on the quoted
+    axis name - ``"cto"`` matches ``["cto","technologist"]`` but not
+    ``["cto_advisory"]``, because the surrounding quotes anchor the match.
+
+    The clause is deliberately strict: an untagged (NULL) row does NOT match.
+    Legacy rows therefore stay invisible to an axis-filtered query, which is why
+    the context builder always blends in an unfiltered global floor - see
+    ContextBuilder.retrieve(). Lives here (not in one store) so vector_store and
+    graph_store filter identically without importing each other.
+    """
+    if isinstance(axes, str):
+        names = [axes.strip()] if axes.strip() else []
+    else:
+        names = [str(a).strip() for a in (axes or []) if str(a).strip()]
+    if not names:
+        return "", []
+    parts: List[str] = []
+    params: List[Any] = []
+    for name in names:
+        # Escape LIKE metacharacters: an axis literally named "a_b" must not
+        # match "axb" via the single-character wildcard.
+        literal = name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        parts.append("%s LIKE ? ESCAPE '\\'" % column)
+        params.append('%%"%s"%%' % literal)
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def score_axes(
+    text: str,
+    axes_cfg: Optional[Dict[str, Any]],
+    kind: Optional[str] = None,
+) -> Dict[str, float]:
+    """Confidence per expert axis, in 0..1. Deterministic and config-driven.
+
+    One implementation shared by the curator (tagging a stored segment) and the
+    context builder (routing a query), so the two can never drift apart. Reuses
+    ``keyword_overlap`` rather than introducing a second matching rule.
+
+    Confidence saturates rather than growing without bound::
+
+        confidence = weight * hits / (hits + saturation)
+
+    so one keyword hit is meaningful, three is confident, and thirty is not
+    thirty times more confident. ``weight`` and ``saturation`` come from config,
+    which is what keeps the axis vocabulary tunable by data instead of by code.
+
+    ``kind`` applies the Experience gate: an axis marked ``experience_only``
+    (cto / founder) is scored only when ``kind == "experience"``. Passing
+    ``kind=None`` disables the gate - correct for *query* routing, where asking
+    a build-vs-buy question should activate the cto lens regardless of what the
+    stored memory was classified as.
+    """
+    cfg = axes_cfg or {}
+    saturation = float(cfg.get("saturation", 1.0)) or 1.0
+    scores: Dict[str, float] = {}
+    for name, spec in (cfg.get("axes") or {}).items():
+        spec = spec or {}
+        if kind is not None and spec.get("experience_only") and kind != "experience":
+            # Never label a memory cto/founder just because it sounds
+            # founder-minded (EXPERT_AXIS_ROUTING_v0.5.md section 1).
+            continue
+        hits = keyword_overlap(text, spec.get("keywords") or [])
+        if not hits:
+            continue
+        weight = float(spec.get("weight", 1.0))
+        scores[str(name)] = round(weight * hits / (hits + saturation), 6)
+    return scores
+
+
+def active_axes(scores: Dict[str, float], axes_cfg: Optional[Dict[str, Any]]) -> List[str]:
+    """Axis names above the configured confidence floor, strongest first.
+
+    Ties break on the axis name so the ordering is reproducible run to run -
+    a tagging pipeline whose output depends on dict iteration order is not
+    something we can test or diff.
+    """
+    threshold = float((axes_cfg or {}).get("min_confidence", 0.0))
+    passing = [axis for axis, score in scores.items() if score >= threshold]
+    return sorted(passing, key=lambda axis: (-scores[axis], axis))
+
+
 def truncate(text: str, limit: int, marker: str = " ...[truncated]") -> str:
     """Hard-truncate to ``limit`` characters, preferring a word boundary.
 

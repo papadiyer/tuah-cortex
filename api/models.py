@@ -275,9 +275,25 @@ class SearchRequest:
         if date_range and not isinstance(date_range, dict):
             raise ValidationError("filters.date_range must be an object", "filters.date_range")
 
+        # Expert-axis lens. Accepts a single axis or a list; anything else is a
+        # client bug and is rejected rather than silently ignored, which would
+        # return an unfiltered result set the caller believes was filtered.
+        experts = filters.get("experts")
+        if experts is not None:
+            if isinstance(experts, str):
+                experts = [experts]
+            elif isinstance(experts, list):
+                experts = [str(a) for a in experts]
+            else:
+                raise ValidationError(
+                    "filters.experts must be a string or a list of strings",
+                    "filters.experts",
+                )
+
         normalised = {
             "project": filters.get("project"),
             "entity": filters.get("entity"),
+            "experts": experts,
             "memory_type": filters.get("memory_type"),
             "status": status,
             "source": filters.get("source"),

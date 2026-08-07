@@ -1,0 +1,44 @@
+{"_comment": "Golden query set for expert-axis routing (docs/EXPERT_AXIS_ROUTING_v0.5.md section 7). Each row: prompt + the axis/axes a competent router should activate. `expect` is the primary axis; `accept` lists axes that are also defensible for a mixed-domain prompt and are NOT counted as leakage. Used by tests/test_expert_routing_eval.py to report route accuracy and leakage - the numbers are REPORTED, not asserted against a hardcoded target."}
+{"id": "telco-01", "category": "telco_proposal", "prompt": "Draft the SLA section for the Maxis 5G private network proposal", "expect": "telco_presales", "accept": ["technologist"]}
+{"id": "telco-02", "category": "telco_proposal", "prompt": "Customer wants a BOQ for the RAN rollout, what line items do we include?", "expect": "telco_presales", "accept": []}
+{"id": "telco-03", "category": "telco_proposal", "prompt": "We received an RFI from the customer on core network redundancy", "expect": "telco_presales", "accept": ["technologist"]}
+{"id": "telco-04", "category": "telco_proposal", "prompt": "What commercial terms should go into the tender response?", "expect": "telco_presales", "accept": []}
+{"id": "telco-05", "category": "telco_proposal", "prompt": "Prepare the presales deck for the private network opportunity", "expect": "telco_presales", "accept": []}
+{"id": "telco-06", "category": "telco_proposal", "prompt": "The RFP asks for guaranteed bandwidth and an SLA credit regime", "expect": "telco_presales", "accept": []}
+{"id": "telco-07", "category": "telco_proposal", "prompt": "How do we price the 5G core network managed service for this customer?", "expect": "telco_presales", "accept": ["founder"]}
+{"id": "telco-08", "category": "telco_proposal", "prompt": "Summarise the RAN coverage commitment we made in the last proposal", "expect": "telco_presales", "accept": []}
+{"id": "linux-01", "category": "linux_troubleshooting", "prompt": "Proxmox node lost its ZFS pool after reboot, how do I recover it?", "expect": "linux_pro", "accept": []}
+{"id": "linux-02", "category": "linux_troubleshooting", "prompt": "systemd service keeps restarting, what does journalctl show me?", "expect": "linux_pro", "accept": []}
+{"id": "linux-03", "category": "linux_troubleshooting", "prompt": "Fix the fstab entry so the LVM volume mounts at boot on Debian", "expect": "linux_pro", "accept": []}
+{"id": "linux-04", "category": "linux_troubleshooting", "prompt": "iptables firewall rule is blocking ssh from the LAN", "expect": "linux_pro", "accept": []}
+{"id": "linux-05", "category": "linux_troubleshooting", "prompt": "Set up a cron job on the Ubuntu box to rotate these logs", "expect": "linux_pro", "accept": []}
+{"id": "linux-06", "category": "linux_troubleshooting", "prompt": "Kernel panic on boot after the last apt upgrade, how do I roll back?", "expect": "linux_pro", "accept": []}
+{"id": "linux-07", "category": "linux_troubleshooting", "prompt": "The daemon is not writing to its socket, check the systemd unit", "expect": "linux_pro", "accept": []}
+{"id": "linux-08", "category": "linux_troubleshooting", "prompt": "Add swap and check why the ZFS ARC is eating all the RAM", "expect": "linux_pro", "accept": []}
+{"id": "arch-01", "category": "m5_architecture", "prompt": "How does the vector store rank results and where does the embedding come from?", "expect": "technologist", "accept": []}
+{"id": "arch-02", "category": "m5_architecture", "prompt": "Explain the RAG retrieval path through the context builder API", "expect": "technologist", "accept": []}
+{"id": "arch-03", "category": "m5_architecture", "prompt": "What is the token budget for the context digest and how is latency measured?", "expect": "technologist", "accept": []}
+{"id": "arch-04", "category": "m5_architecture", "prompt": "Should the inference model run in docker or on the host GPU?", "expect": "technologist", "accept": ["cto"]}
+{"id": "arch-05", "category": "m5_architecture", "prompt": "Describe the architecture of the memory curator and its two stores", "expect": "technologist", "accept": ["cto"]}
+{"id": "arch-06", "category": "m5_architecture", "prompt": "Which api endpoint returns the embedding identity?", "expect": "technologist", "accept": []}
+{"id": "arch-07", "category": "m5_architecture", "prompt": "How do we shard the vector index across kubernetes pods?", "expect": "technologist", "accept": []}
+{"id": "arch-08", "category": "m5_architecture", "prompt": "What model do we use for embedding and what is its dimension?", "expect": "technologist", "accept": []}
+{"id": "founder-01", "category": "founder_decision", "prompt": "What should our pricing and unit economics look like before we hire?", "expect": "founder", "accept": []}
+{"id": "founder-02", "category": "founder_decision", "prompt": "Do we pivot the MVP or push the current product-market fit thesis?", "expect": "founder", "accept": []}
+{"id": "founder-03", "category": "founder_decision", "prompt": "Our burn rate leaves nine months of runway, what changes?", "expect": "founder", "accept": []}
+{"id": "founder-04", "category": "founder_decision", "prompt": "Plan the GTM motion for the first paying customer", "expect": "founder", "accept": ["telco_presales"]}
+{"id": "founder-05", "category": "founder_decision", "prompt": "Is it time to raise funding or stay bootstrapped?", "expect": "founder", "accept": []}
+{"id": "founder-06", "category": "founder_decision", "prompt": "Should I hire a second engineer or extend the runway?", "expect": "founder", "accept": []}
+{"id": "cto-01", "category": "founder_decision", "prompt": "Build vs buy for the observability stack, what is the trade-off?", "expect": "cto", "accept": ["technologist"]}
+{"id": "cto-02", "category": "founder_decision", "prompt": "How much tech debt do we carry into the next roadmap quarter?", "expect": "cto", "accept": []}
+{"id": "cto-03", "category": "founder_decision", "prompt": "Write the architecture decision record for this governance change", "expect": "cto", "accept": ["technologist"]}
+{"id": "cto-04", "category": "founder_decision", "prompt": "Run a postmortem on the outage and capture the governance lesson", "expect": "cto", "accept": []}
+{"id": "mixed-01", "category": "mixed_domain", "prompt": "The customer SLA needs 99.99% uptime, can our proxmox and zfs setup hold it?", "expect": "telco_presales", "accept": ["linux_pro", "technologist"]}
+{"id": "mixed-02", "category": "mixed_domain", "prompt": "Build vs buy the 5G core network platform given our burn rate", "expect": "cto", "accept": ["telco_presales", "founder"]}
+{"id": "mixed-03", "category": "mixed_domain", "prompt": "Price the GPU inference API for the customer proposal", "expect": "technologist", "accept": ["telco_presales", "founder"]}
+{"id": "mixed-04", "category": "mixed_domain", "prompt": "Our kubernetes docker rollout blew the roadmap, what is the tech debt trade-off?", "expect": "cto", "accept": ["technologist"]}
+{"id": "mixed-05", "category": "mixed_domain", "prompt": "Debian kernel tuning for the RAN edge node in the customer tender", "expect": "linux_pro", "accept": ["telco_presales"]}
+{"id": "mixed-06", "category": "mixed_domain", "prompt": "Should we hire a linux systemd specialist or outsource the ssh hardening?", "expect": "founder", "accept": ["linux_pro"]}
+{"id": "neutral-01", "category": "no_axis", "prompt": "Remind me what we agreed yesterday", "expect": null, "accept": []}
+{"id": "neutral-02", "category": "no_axis", "prompt": "Write a short thank you note to the team", "expect": null, "accept": []}
+{"id": "neutral-03", "category": "no_axis", "prompt": "What did I say about my weekend plans?", "expect": null, "accept": []}

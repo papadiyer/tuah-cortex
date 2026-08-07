@@ -15,9 +15,17 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from core.rules import Embedder, cosine, get_embedder, load_rules, repo_path
+from core.rules import (
+    Embedder,
+    cosine,
+    experts_clause,
+    get_embedder,
+    load_json_blob,
+    load_rules,
+    repo_path,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS knowledge (
@@ -45,6 +53,12 @@ _ADDITIVE_COLUMNS = (
     ("project", "TEXT"),
     ("confidence", "REAL"),
     ("updated_at", "TEXT"),
+    # Expert-axis routing (docs/EXPERT_AXIS_ROUTING_v0.5.md section 2). JSON list
+    # + JSON dict. NOT part of embedding identity: tagging a row with an axis
+    # says nothing about which vector space it lives in, so check_compatibility()
+    # is deliberately left untouched by this pair.
+    ("experts", "TEXT"),
+    ("expert_confidence", "TEXT"),
 )
 
 # Default retrieval excludes memories that were replaced or rejected; they stay
@@ -184,6 +198,15 @@ class VectorStore:
             confidence = float(confidence) if confidence is not None else None
         except (TypeError, ValueError):
             confidence = None
+        # Expert axes: promoted out of meta into real columns so retrieval can
+        # filter on them in SQL. Absent -> NULL, which reads as "no axis" and
+        # keeps pre-v0.5 rows behaving exactly as before.
+        experts = meta.pop("experts", None) or None
+        expert_confidence = meta.pop("expert_confidence", None) or None
+        experts_json = json.dumps(list(experts)) if experts else None
+        expert_confidence_json = (
+            json.dumps(dict(expert_confidence), sort_keys=True) if expert_confidence else None
+        )
         vector = self.embedder.embed(text)
         row_identity = {
             "backend": self.embedder.name,
@@ -204,8 +227,9 @@ class VectorStore:
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO knowledge"
             " (text, embedding, source, ts, type, meta, fingerprint, embed_meta,"
-            "  status, source_type, source_id, project, confidence, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  status, source_type, source_id, project, confidence, updated_at,"
+            "  experts, expert_confidence)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 text,
                 json.dumps(vector),
@@ -221,6 +245,8 @@ class VectorStore:
                 project,
                 confidence,
                 _utc_now(),
+                experts_json,
+                expert_confidence_json,
             ),
         )
         self.conn.commit()
@@ -246,7 +272,7 @@ class VectorStore:
     def all_entries(self) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT id, text, source, ts, type, meta, status, source_type,"
-            "       source_id, project, confidence"
+            "       source_id, project, confidence, experts, expert_confidence"
             "  FROM knowledge ORDER BY id"
         ).fetchall()
         return [self._row_to_dict(row) for row in rows]
@@ -273,7 +299,7 @@ class VectorStore:
 
         sql = (
             "SELECT id, text, source, ts, type, meta, status, source_type,"
-            "       source_id, project, confidence"
+            "       source_id, project, confidence, experts, expert_confidence"
             "  FROM knowledge WHERE id = ?"
         )
         params: List[Any] = [key]
@@ -321,6 +347,15 @@ class VectorStore:
             where.append(
                 "COALESCE(status, 'approved') NOT IN ('%s')" % "','".join(_EXCLUDED_BY_DEFAULT)
             )
+        if filters.get("experts"):
+            # Expert-axis lens (EXPERT_AXIS_ROUTING_v0.5.md section 6). Reuses
+            # the same clause builder as query()/graph_store, so a filtered
+            # search and a routed retrieval always agree on what "tagged cto"
+            # means.
+            clause, values = experts_clause(filters["experts"])
+            if clause:
+                where.append(clause)
+                params.extend(values)
         if filters.get("min_confidence") is not None:
             _add("COALESCE(confidence, 1.0) >= ?", float(filters["min_confidence"]))
         if filters.get("date_from"):
@@ -342,7 +377,8 @@ class VectorStore:
 
         sql = (
             "SELECT id, text, embedding, source, ts, type, meta, embed_meta,"
-            "       status, source_type, source_id, project, confidence"
+            "       status, source_type, source_id, project, confidence,"
+            "       experts, expert_confidence"
             "  FROM knowledge"
         )
         if where:
@@ -387,6 +423,7 @@ class VectorStore:
         text: str,
         top_k: Optional[int] = None,
         project: Optional[str] = None,
+        experts: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         """Return the top_k knowledge entries ranked by cosine similarity.
 
@@ -400,6 +437,12 @@ class VectorStore:
         another client's memory must never be ranked into this project's digest.
         Project-less rows are kept because they are global memory (preferences,
         operating rules) that legitimately applies everywhere.
+
+        ``experts`` (optional, additive) narrows the candidate pool to rows
+        tagged with any of the given axes. Unlike ``project``, untagged rows are
+        NOT included - this is a lens, and a caller asking for the telco lens
+        wants telco memory. Callers that need recall regardless (the context
+        builder) issue a second unfiltered query and blend the two.
         """
         if top_k is None:
             top_k = int(self.rules["retrieval"]["vector_top_k"])
@@ -411,7 +454,8 @@ class VectorStore:
 
         sql = (
             "SELECT id, text, embedding, source, ts, type, meta, embed_meta,"
-            "       status, source_type, source_id, project, confidence"
+            "       status, source_type, source_id, project, confidence,"
+            "       experts, expert_confidence"
             "  FROM knowledge"
             " WHERE COALESCE(status, 'approved') NOT IN (?, ?)"
         )
@@ -420,6 +464,11 @@ class VectorStore:
             # This project's rows plus global (project-less) rows only.
             sql += " AND (project = ? OR project IS NULL OR project = '')"
             params.append(project)
+        if experts:
+            clause, values = experts_clause(experts)
+            if clause:
+                sql += " AND " + clause
+                params.extend(values)
 
         scored: List[Dict[str, Any]] = []
         for row in self.conn.execute(sql, params):
@@ -554,6 +603,12 @@ class VectorStore:
             entry["project"] = row["project"]
         if "confidence" in keys:
             entry["confidence"] = row["confidence"]
+        # Expert axes decode to their empty form, never NULL: a caller iterating
+        # entry["experts"] must not have to special-case a pre-v0.5 row.
+        if "experts" in keys:
+            entry["experts"] = load_json_blob(row["experts"], list)
+        if "expert_confidence" in keys:
+            entry["expert_confidence"] = load_json_blob(row["expert_confidence"], dict)
         return entry
 
 

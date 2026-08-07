@@ -279,6 +279,48 @@ class TestCortexServiceClosesAllThree(_IsolatedStoreTest):
             self.assertFalse(_is_open(store), "a detached handle was left open")
 
 
+class TestPartialConstructionDoesNotLeak(_IsolatedStoreTest):
+    """If the second store fails to open, the first must not be stranded.
+
+    ContextBuilder/Curator open the vector store first. When the graph store
+    then raises, the vector handle is already open but no caller ever receives
+    a reference to it - so nothing could close it. The constructor closes it
+    before propagating.
+    """
+
+    def _with_failing_graph(self, factory):
+        import core.graph_store as gsmod
+
+        opened = {}
+        real_graph_init = gsmod.GraphStore.__init__
+        real_vector_init = VectorStore.__init__
+
+        def capture_vector(self, *args, **kwargs):
+            real_vector_init(self, *args, **kwargs)
+            opened["vector"] = self
+
+        def fail_graph(self, *args, **kwargs):
+            raise RuntimeError("graph store refused to open")
+
+        VectorStore.__init__ = capture_vector
+        gsmod.GraphStore.__init__ = fail_graph
+        try:
+            with self.assertRaises(RuntimeError):
+                factory()
+        finally:
+            VectorStore.__init__ = real_vector_init
+            gsmod.GraphStore.__init__ = real_graph_init
+
+        self.assertIn("vector", opened, "the vector store was constructed")
+        assert_closed(self, opened["vector"], "orphaned vector store")
+
+    def test_context_builder_closes_vector_when_graph_fails(self):
+        self._with_failing_graph(lambda: ContextBuilder(rules=self.rules, use_ripgrep=False))
+
+    def test_curator_closes_vector_when_graph_fails(self):
+        self._with_failing_graph(lambda: Curator(rules=self.rules))
+
+
 class TestNoResourceWarningOnDrop(unittest.TestCase):
     """The GC-time backstop: dropping an unclosed store must stay silent."""
 

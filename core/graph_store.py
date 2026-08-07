@@ -18,7 +18,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from core.rules import load_rules, repo_path, tokenize
+from core.rules import experts_clause, load_json_blob, load_rules, repo_path, tokenize
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -50,6 +50,11 @@ _ADDITIVE_EDGE_COLUMNS = (
     ("status", "TEXT"),
     ("source_type", "TEXT"),
     ("project", "TEXT"),
+    # Expert-axis routing (docs/EXPERT_AXIS_ROUTING_v0.5.md section 2). Real
+    # columns rather than meta JSON, matching how status/project were promoted,
+    # so an axis-filtered query stays pure SQL.
+    ("experts", "TEXT"),
+    ("expert_confidence", "TEXT"),
 )
 _ADDITIVE_NODE_COLUMNS = (
     ("status", "TEXT"),
@@ -188,6 +193,14 @@ class GraphStore:
         status = payload.pop("status", None) or "approved"
         source_type = payload.pop("source_type", None) or "conversation"
         project = payload.pop("project", None)
+        # Expert axes promoted to columns, same as status/project above. Absent
+        # -> NULL, which reads as "no axis" for pre-v0.5 edges.
+        experts = payload.pop("experts", None) or None
+        expert_confidence = payload.pop("expert_confidence", None) or None
+        experts_json = json.dumps(list(experts)) if experts else None
+        expert_confidence_json = (
+            json.dumps(dict(expert_confidence), sort_keys=True) if expert_confidence else None
+        )
         # Endpoint nodes inherit the edge's project scope so a project-filtered
         # graph query can reach them; status stays per-row.
         node_meta = {"project": project} if project else None
@@ -197,8 +210,9 @@ class GraphStore:
             return None
         self.conn.execute(
             "INSERT OR IGNORE INTO edges"
-            " (src, dst, rel, source, ts, meta, status, source_type, project)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (src, dst, rel, source, ts, meta, status, source_type, project,"
+            "  experts, expert_confidence)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 src,
                 dst,
@@ -209,6 +223,8 @@ class GraphStore:
                 status,
                 source_type,
                 project,
+                experts_json,
+                expert_confidence_json,
             ),
         )
         self.conn.commit()
@@ -300,11 +316,16 @@ class GraphStore:
         subject_or_keyword: str,
         top_k: Optional[int] = None,
         project: Optional[str] = None,
+        experts: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         """Rank edges by keyword overlap with subject/relation/object labels.
 
         ``project`` (optional, additive) scopes the search to one project's
         experience; superseded/rejected edges are always excluded.
+
+        ``experts`` (optional, additive) narrows to edges tagged with any of the
+        given axes. Untagged edges are excluded - see rules.experts_clause; the
+        context builder compensates with an unfiltered global floor.
         """
         if top_k is None:
             top_k = int(self.rules["retrieval"]["graph_top_k"])
@@ -316,7 +337,8 @@ class GraphStore:
         sql = (
             "SELECT e.id AS id, s.label AS src, e.rel AS rel, d.label AS dst,"
             "       e.source AS source, e.ts AS ts, e.status AS status,"
-            "       e.source_type AS source_type, e.project AS project"
+            "       e.source_type AS source_type, e.project AS project,"
+            "       e.experts AS experts, e.expert_confidence AS expert_confidence"
             " FROM edges e"
             " JOIN nodes s ON s.id = e.src"
             " JOIN nodes d ON d.id = e.dst"
@@ -328,6 +350,11 @@ class GraphStore:
             # project's experience must never be ranked into this digest.
             sql += " AND (e.project = ? OR e.project IS NULL OR e.project = '')"
             params.append(project)
+        if experts:
+            clause, values = experts_clause(experts, column="e.experts")
+            if clause:
+                sql += " AND " + clause
+                params.extend(values)
         rows = self.conn.execute(sql, params).fetchall()
         for row in rows:
             triple = "%s %s %s" % (row["src"], row["rel"], row["dst"])
@@ -357,6 +384,8 @@ class GraphStore:
                     "status": row["status"] or "approved",
                     "source_type": row["source_type"] or "conversation",
                     "project": row["project"],
+                    "experts": load_json_blob(row["experts"], list),
+                    "expert_confidence": load_json_blob(row["expert_confidence"], dict),
                 }
             )
         results.sort(key=lambda e: (-e["score"], e["id"]))

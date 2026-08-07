@@ -76,6 +76,13 @@ Response:
   "open_tasks": [],
   "relations": [],
   "recommended_agent": "jebat",
+  "expert_routing": { "telco_presales": 0.86, "technologist": 0.44 },
+  "persona": {
+    "voice": "abah_abah",
+    "voice_spec": "casual EN+MS mixing, warm, direct, no corporate fluff",
+    "default_stance": ["cto", "founder"],
+    "expert_axes": ["telco_presales", "linux_pro", "technologist", "cto", "founder"]
+  },
   "context_markdown": "budgeted digest",
   "provenance": [],
   "warnings": []
@@ -91,6 +98,17 @@ Behaviour:
 - Tier 2 (full conversations, old docs, historical detail) is **not** injected
   automatically.
 - `recommended_agent` is selected from the resolved context (default `jebat`).
+- `expert_routing` (additive, v0.5) reports which expertise axes the prompt
+  activated, as `axis -> weight` in 0..1 (see
+  `docs/EXPERT_AXIS_ROUTING_v0.5.md`). Routing shapes **candidate generation**:
+  each active axis contributes an axis-filtered retrieval pool, blended with a
+  smaller unfiltered pool so recall never drops below the unrouted baseline.
+  An **empty object means no axis fired** and plain global retrieval was used —
+  it is not an error, and callers must not treat it as one. The axis vocabulary
+  comes from `cortex_rules.json` → `expert_axes`; adding an axis is config-only.
+- `persona` (additive, v0.5) is Tier 0 voice and default stance, read from
+  `identity.json`. Always-on and never semantically retrieved, so it does not
+  vary with what memory happened to match. `{}` if the config omits it.
 - `warnings` carries non-fatal issues (e.g. `embedding_identity_mismatch`
   surfaced as a warning before a hard 409, or `graphify_unavailable`).
 - Latency target: measured baseline, recorded in TEST_REPORT; not fabricated.
@@ -140,11 +158,21 @@ Hermes `state.db` is **never** written by this endpoint.
 ## 4. Memory Search — `POST /v1/memory/search`
 
 Supports filters: `project`, `entity`, `date_range`, `memory_type`, `status`,
-`confidence`, `source`, `approved_only`.
+`confidence`, `source`, `approved_only`, `experts`.
 
 ```json
 { "query": "optional free text", "filters": { "memory_type": "decision",
   "status": "approved", "project": "jebat-cortex", "limit": 20 } }
+```
+
+`experts` (additive, v0.5) narrows results to memories tagged with any of the
+given expert axes — a string or a list of strings; any other type is a `400`.
+It is a **lens, not a preference**: untagged memories (everything written before
+v0.5) do not match, so an axis filter over a legacy store legitimately returns
+nothing. Omit the filter to search all memory.
+
+```json
+{ "query": "sla", "filters": { "experts": ["telco_presales"] } }
 ```
 
 Returns matching memories with provenance (Workstream 4). Respects the same

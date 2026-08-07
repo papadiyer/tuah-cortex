@@ -18,7 +18,15 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from core.graph_store import GraphStore, rg_available, ripgrep_fallback
-from core.rules import SERVICE_VERSION, load_identity, load_rules, tokenize, truncate
+from core.rules import (
+    SERVICE_VERSION,
+    active_axes,
+    load_identity,
+    load_rules,
+    score_axes,
+    tokenize,
+    truncate,
+)
 from core.vector_store import VectorStore
 
 # Knowledge and Experience scores are computed by different functions (cosine
@@ -113,6 +121,22 @@ class ContextBuilder:
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
+    # -- expert routing ----------------------------------------------------
+    def route_experts(self, prompt: str) -> Dict[str, float]:
+        """Axis weights for a prompt: {"linux_pro": 0.83, ...}. {} if none fire.
+
+        Reuses ``rules.score_axes`` - the identical scorer the curator tags with.
+        No ``kind`` gate is applied: routing is about what the *question* needs,
+        so "should we build or buy this?" activates the cto lens even though the
+        cto *tag* is restricted to Experience memories at write time.
+
+        An empty result is meaningful and is the caller's signal to fall back to
+        global retrieval, never to return nothing.
+        """
+        axes_cfg = self.rules.get("expert_axes") or {}
+        scores = score_axes(prompt, axes_cfg)
+        return {axis: scores[axis] for axis in active_axes(scores, axes_cfg)}
+
     # -- retrieval ---------------------------------------------------------
     def retrieve(
         self, prompt: str, project: Optional[str] = None
@@ -126,19 +150,138 @@ class ContextBuilder:
         self.vector.check_compatibility(raise_on_mismatch=True)
 
         retrieval = self.rules["retrieval"]
+        vector_top_k = int(retrieval["vector_top_k"])
+        graph_top_k = int(retrieval["graph_top_k"])
+
+        # -- Intent/domain routing shapes CANDIDATE GENERATION --------------
+        # (EXPERT_AXIS_ROUTING_v0.5.md section 4). Per-axis queries decide WHICH
+        # memories enter the pool; this is not a rerank of a pool that already
+        # contains the wrong things.
+        routing = self.route_experts(prompt)
+
         # `project` scopes Tier 1 to the resolved project plus global memory.
         # Without it, another project's knowledge/experience would be ranked
         # into this digest purely on cosine/token overlap.
-        knowledge = self.vector.query(prompt, int(retrieval["vector_top_k"]), project=project)
-        experience = self.graph.query(prompt, int(retrieval["graph_top_k"]), project=project)
+        if routing:
+            knowledge, experience = self._routed_candidates(
+                prompt, project, routing, vector_top_k, graph_top_k
+            )
+        else:
+            # No axis fired: exactly the RC1 path, so routing can never make
+            # retrieval worse than it was before v0.5.
+            knowledge = self.vector.query(prompt, vector_top_k, project=project)
+            experience = self.graph.query(prompt, graph_top_k, project=project)
         fallback: List[Dict[str, Any]] = []
         if self.use_ripgrep and not experience:
             # The graph knows nothing about this prompt; go look at the actual
             # repository rather than returning an empty Experience section.
             keyword = _primary_keyword(prompt)
             if keyword:
-                fallback = ripgrep_fallback(keyword, top_k=int(retrieval["graph_top_k"]))
-        return {"knowledge": knowledge, "experience": experience, "ripgrep": fallback}
+                fallback = ripgrep_fallback(keyword, top_k=graph_top_k)
+        return {
+            "knowledge": knowledge,
+            "experience": experience,
+            "ripgrep": fallback,
+            "expert_routing": routing,
+        }
+
+    def _routed_candidates(
+        self,
+        prompt: str,
+        project: Optional[str],
+        routing: Dict[str, float],
+        vector_top_k: int,
+        graph_top_k: int,
+    ) -> "tuple":
+        """Per-axis candidate generation, blended with a global recall floor.
+
+        Two things are true at once and both matter:
+
+        * an axis-filtered query is precise but blind to untagged rows (every
+          memory written before v0.5, and every legitimately unlabelled one);
+        * a purely global query is what RC1 already did.
+
+        So we take both: per-axis pools give the lens its precision, and an
+        unfiltered pool at the SAME top_k as the unrouted path guarantees we
+        never return less than plain global retrieval would. Without that floor,
+        enabling routing on a store of untagged legacy rows would empty the
+        digest - a silent regression, which this codebase treats as a bug rather
+        than a tuning choice. The floor is deliberately NOT configurable: a
+        shallower floor would reintroduce exactly that regression.
+
+        Axis hits are boosted by ``retrieval.expert_boost`` scaled by the axis
+        weight, so a strongly-routed memory outranks an equally-similar global
+        one. ``expert_boost`` is baselined empirically on
+        tests/golden/expert_routing.jsonl, not guessed (design doc section 9
+        forbids hardcoded weighting). Merging is by memory id, keeping the
+        highest score seen.
+        """
+        cfg = self.rules["retrieval"]
+        per_axis_k = int(cfg.get("expert_top_k", vector_top_k))
+        boost = float(cfg.get("expert_boost", 0.0))
+        axes = list(routing)
+
+        def _blend(pools: List[List[Dict[str, Any]]], keys: List[Optional[float]], limit: int):
+            best: Dict[Any, Dict[str, Any]] = {}
+            for pool, weight in zip(pools, keys):
+                for entry in pool:
+                    scored = dict(entry)
+                    if weight is not None:
+                        # Multiplicative, weight-scaled boost: at the baselined
+                        # expert_boost=1.0 a fully-confident axis can at most
+                        # double a memory's score. Bounded on purpose - a
+                        # genuinely better semantic match can still outrank a
+                        # weakly-routed one, so the lens tilts the ranking
+                        # rather than dictating it.
+                        scored["score"] = round(
+                            float(entry.get("score") or 0.0) * (1.0 + boost * weight), 6
+                        )
+                        scored["routed_by"] = entry.get("routed_by") or []
+                    key = entry.get("id")
+                    if key is None:
+                        key = (entry.get("text"), entry.get("source"))
+                    previous = best.get(key)
+                    if previous is None or scored["score"] > previous["score"]:
+                        if previous is not None:
+                            scored["routed_by"] = sorted(
+                                set(previous.get("routed_by") or [])
+                                | set(scored.get("routed_by") or [])
+                            )
+                        best[key] = scored
+                    elif scored.get("routed_by"):
+                        previous["routed_by"] = sorted(
+                            set(previous.get("routed_by") or []) | set(scored["routed_by"])
+                        )
+            merged = sorted(best.values(), key=lambda e: (-(e.get("score") or 0.0), e.get("id") or 0))
+            return merged[:limit]
+
+        knowledge_pools: List[List[Dict[str, Any]]] = []
+        experience_pools: List[List[Dict[str, Any]]] = []
+        weights: List[Optional[float]] = []
+        for axis in axes:
+            hits = self.vector.query(prompt, per_axis_k, project=project, experts=[axis])
+            for hit in hits:
+                hit["routed_by"] = [axis]
+            knowledge_pools.append(hits)
+            edges = self.graph.query(prompt, per_axis_k, project=project, experts=[axis])
+            for edge in edges:
+                edge["routed_by"] = [axis]
+            experience_pools.append(edges)
+            weights.append(routing[axis])
+
+        # Global recall floor (unboosted) - the structural guarantee against
+        # regression. It is queried at the SAME top_k the unrouted path uses,
+        # not a smaller configurable number: a floor shallower than the baseline
+        # would let the blended pool come back smaller than plain global
+        # retrieval, which is the one outcome routing must never produce. The
+        # floor's job is recall, the per-axis pools' job is precision.
+        knowledge_pools.append(self.vector.query(prompt, vector_top_k, project=project))
+        experience_pools.append(self.graph.query(prompt, graph_top_k, project=project))
+        weights.append(None)
+
+        knowledge = _blend(knowledge_pools, weights, vector_top_k)
+        experience = _blend(experience_pools, weights, graph_top_k)
+        return knowledge, experience
 
     def merge(self, retrieved: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         """Interleave both memory types into one ranked list."""
@@ -249,6 +392,7 @@ class ContextBuilder:
             "memory_block_chars": len(memory_block),
             "prompt_chars": len(prompt_slice),
             "ripgrep_available": rg_available(),
+            "expert_routing": retrieved.get("expert_routing") or {},
         }
 
     # -- preflight (API_CONTRACTS.md section 2) ----------------------------
@@ -354,6 +498,11 @@ class ContextBuilder:
                 i.get("relation") for i in experience_items if i.get("relation")
             ],
             "recommended_agent": self._recommend_agent(prompt, identity_cfg),
+            # Which expertise lenses fired for this prompt, so Tuah/Jebat can see
+            # the routing rather than infer it (API_CONTRACTS.md section 2).
+            # Empty object = no axis fired, global retrieval was used.
+            "expert_routing": retrieved.get("expert_routing") or {},
+            "persona": self._persona(identity_cfg),
             "context_markdown": context_markdown,
             "context_chars": len(context_markdown),
             "memory_char_budget": budget_chars,
@@ -469,6 +618,18 @@ class ContextBuilder:
             "operating_rules": identity_cfg.get("operating_rules") or [],
             "active_project": project,
         }
+
+    @staticmethod
+    def _persona(identity_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Tier 0 persona: voice + default stance, from stable config only.
+
+        Persona is always-on and is NOT an expertise lens: it must not vary with
+        what cosine recall happened to return, or Jebat would sound like a
+        different person per query (EXPERT_AXIS_ROUTING_v0.5.md section 0). A
+        missing persona block yields {} rather than an invented voice.
+        """
+        persona = identity_cfg.get("persona")
+        return dict(persona) if isinstance(persona, dict) else {}
 
     @staticmethod
     def _recommend_agent(prompt: str, identity_cfg: Dict[str, Any]) -> str:

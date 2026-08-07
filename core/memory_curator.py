@@ -25,7 +25,7 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.graph_store import GraphStore
-from core.rules import keyword_overlap, load_rules, repo_path, tokenize
+from core.rules import active_axes, keyword_overlap, load_rules, repo_path, score_axes, tokenize
 from core.vector_store import VectorStore
 
 # Relation cues -> edge type. Order matters: first match wins.
@@ -53,6 +53,16 @@ _RELATION_CUE_WORDS = frozenset(
     contains include includes has use uses wired connect connects""".split()
 )
 _MODULE_RE = re.compile(r"(?m)^\s*(?:from|import)\s+([A-Za-z_][\w.]*)")
+
+# Which postflight memory types count as Experience for the cto/founder gate.
+# process_message() has a literal "experience"/"knowledge" kind; an event does
+# not, so the mapping is stated here instead of being inferred per call site.
+# A `decision` qualifies because EXPERT_AXIS_ROUTING_v0.5.md section 1 scopes the
+# cto tag to "architecture trade-off, build-vs-buy, governance, product
+# decisions, failure lessons" - a recorded decision is a judgement, not a
+# neutral fact. Lessons/tasks stay knowledge-class and can never be tagged
+# cto/founder.
+_EXPERIENCE_CLASS_TYPES = frozenset({"experience", "decision"})
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
@@ -85,6 +95,9 @@ class Curator:
         self._experience_keywords = cls["experience_keywords"]
         self._knowledge_keywords = cls["knowledge_keywords"]
         self._experience_patterns = [re.compile(p) for p in cls["experience_patterns"]]
+        # Optional section: a config without expert_axes simply tags nothing,
+        # which is exactly pre-v0.5 behaviour.
+        self._expert_axes = self.rules.get("expert_axes") or {}
 
     @property
     def own_stores(self) -> Dict[str, Any]:
@@ -136,6 +149,24 @@ class Curator:
             if pattern.search(text):
                 experience += 2.0
         return {"experience": experience, "knowledge": knowledge}
+
+    def score_experts(self, text: str, kind: Optional[str] = None) -> Dict[str, float]:
+        """Expert-axis confidences for a segment, in 0..1.
+
+        Thin wrapper over ``rules.score_axes`` - the same scorer the context
+        builder routes with, so a memory is tagged by exactly the rule that will
+        later retrieve it.
+
+        ``kind`` enforces the Experience gate: cto/founder never attach to a
+        knowledge segment (EXPERT_AXIS_ROUTING_v0.5.md section 3). Callers that
+        omit it get the ungated score, so this stays useful for inspection.
+        """
+        return score_axes(text, self._expert_axes, kind=kind)
+
+    def expert_tags(self, text: str, kind: Optional[str] = None) -> Tuple[List[str], Dict[str, float]]:
+        """(axes above threshold, confidence per axis) for one segment."""
+        scores = self.score_experts(text, kind=kind)
+        return active_axes(scores, self._expert_axes), scores
 
     def classify(self, text: str) -> str:
         """'experience' or 'knowledge'. Ties fall back to knowledge."""
@@ -235,6 +266,7 @@ class Curator:
         for segment in self.segment_message(content):
             await asyncio.sleep(0)  # cooperative yield; keeps the loop fair
             kind = self.classify(segment)
+            experts, expert_confidence = self.expert_tags(segment, kind=kind)
             record: Dict[str, Any] = {
                 "text": segment,
                 "kind": kind,
@@ -242,6 +274,8 @@ class Curator:
                 "ts": ts,
                 "source": source,
                 "scores": self.score_segment(segment),
+                "experts": experts,
+                "expert_confidence": expert_confidence,
             }
             if kind == "experience":
                 record["relations"] = self.extract_relations(segment, source)
@@ -274,7 +308,13 @@ class Curator:
             if record["kind"] == "knowledge":
                 row_id = self.vector.add(
                     record["text"],
-                    {"source": record["source"], "ts": record["ts"], "role": record["role"]},
+                    {
+                        "source": record["source"],
+                        "ts": record["ts"],
+                        "role": record["role"],
+                        "experts": record["experts"],
+                        "expert_confidence": record["expert_confidence"],
+                    },
                 )
                 if row_id is not None:
                     knowledge_added += 1
@@ -293,7 +333,12 @@ class Curator:
                         triple["rel"],
                         triple["dst"],
                         source=record["source"],
-                        meta={"ts": record["ts"], "role": record["role"]},
+                        meta={
+                            "ts": record["ts"],
+                            "role": record["role"],
+                            "experts": record["experts"],
+                            "expert_confidence": record["expert_confidence"],
+                        },
                     )
                     if edge_id is not None:
                         experience_edges += 1
@@ -374,6 +419,19 @@ class Curator:
         skipped: List[Dict[str, str]] = []
 
         def _store(kind: str, text: str, meta: Dict[str, Any]) -> None:
+            # Tag with the same scorer used by conversation ingest. The gate key
+            # is the memory's own type, so a `lesson` cannot pick up a cto tag
+            # while a `decision` can.
+            gate = (
+                "experience"
+                if str(meta.get("type")) in _EXPERIENCE_CLASS_TYPES
+                else "knowledge"
+            )
+            experts, expert_confidence = self.expert_tags(text, kind=gate)
+            if experts:
+                meta = dict(meta)
+                meta["experts"] = experts
+                meta["expert_confidence"] = expert_confidence
             if self.vector.add(text, meta) is not None:
                 counts[kind] += 1
             else:
@@ -413,6 +471,8 @@ class Curator:
             if not ref:
                 continue
             kind = (artefact.get("kind") or "file").strip() or "file"
+            # Artefacts are structural Experience, so the gate is open here.
+            art_experts, art_confidence = self.expert_tags(ref, kind="experience")
             edge_id = self.graph.add_edge(
                 agent,
                 "produced",
@@ -424,6 +484,8 @@ class Curator:
                     "source_type": "agent_event",
                     "project": project,
                     "kind": kind,
+                    "experts": art_experts,
+                    "expert_confidence": art_confidence,
                 },
             )
             if edge_id is not None:

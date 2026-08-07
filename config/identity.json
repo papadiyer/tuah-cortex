@@ -22,6 +22,13 @@
     "No shell execution through the API or MCP surface.",
     "A proposal is never presented as an approved decision."
   ],
+  "persona": {
+    "_comment": "Tier 0 persona: always-on, never retrieved (docs/EXPERT_AXIS_ROUTING_v0.5.md section 5). expert_axes is the valid axis vocabulary for the router; adding an axis here + in cortex_rules.json expert_axes needs NO code change.",
+    "voice": "abah_abah",
+    "voice_spec": "casual EN+MS mixing, warm, direct, no corporate fluff",
+    "default_stance": ["cto", "founder"],
+    "expert_axes": ["telco_presales", "linux_pro", "technologist", "cto", "founder"]
+  },
   "default_agent": "jebat",
   "agent_routing": [
     { "agent": "lekiu", "keywords": ["code", "implement", "build", "refactor", "test", "bug", "api", "python", "module", "function", "repo"] },
