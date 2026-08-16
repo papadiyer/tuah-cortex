@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Pattern, Tuple
 
 from api import admin as admin_routes
 from api import context as context_routes
+from api import embeddings as embeddings_routes
 from api import events as events_routes
 from api import health as health_routes
 from api import memory as memory_routes
@@ -110,6 +111,15 @@ def build_routes(service: CortexService) -> List[Route]:
             "POST",
             "/v1/memory/search",
             lambda body: memory_routes.post_memory_search(service, body),
+            True,
+            False,
+        ),
+        # Tuah-Cortex fork: OpenAI-compatible embeddings so OpenClaw's
+        # memory-lancedb plugin can use local sentence-transformers (no OpenAI 429).
+        Route(
+            "POST",
+            "/v1/embeddings",
+            lambda body: embeddings_routes.post_embeddings(service, body),
             True,
             False,
         ),
