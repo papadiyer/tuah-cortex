@@ -1,102 +1,180 @@
-# Jebat-Cortex
+# 🧠 Tuah-Cortex
 
-Automated memory pipeline modelling the **prefrontal cortex** — long-term
-memory, context indexing, and information management for Jebat / Hermes.
+> **Local, OpenAI-free embeddings for your OpenClaw agent's long-term memory.**
+> Drop the `429 insufficient_quota`. Keep your agent's brain on your own machine.
 
-Jebat-Cortex turns a conversation log into two memory types and merges them
-into a hard-budgeted context block that is injected into Jebat's system prompt.
+Tuah-Cortex is a **standalone fork** of Jebat-Cortex — a prefrontal-cortex-style
+memory pipeline (vector + graph + context builder) — extended with one sharp
+addition: an **OpenAI-compatible `/v1/embeddings` endpoint** backed by a local
+`sentence-transformers` model (MiniLM, 384-dim).
 
-```
-Chat -> Conversation -> Memory Curator -> (split)
-  |- Experience  -> Graph Store   (relational / code graph; ripgrep fallback)
-  |- Knowledge   -> Vector Store  (semantic long-term memory)
-Both merge at Context Builder -> injected into Jebat system prompt.
-```
-
-## Why Graphify sits beside Jebat-Cortex
+Point OpenClaw's `memory-lancedb` plugin at it and your agent's RAG/memory
+embeddings run **100% locally**. No API key. No quota. No bill.
 
 ```
-Jebat/Hermes  ->  Graphify (repo knowledge graph)  ->  Lekiu / Codex / Claude Code
-Jebat-Cortex  ->  Experience (graph) + Knowledge (vector) memory
+┌─────────────┐     embeddings      ┌──────────────────┐
+│  OpenClaw   │ ──── POST /v1 ───▶ │   Tuah-Cortex    │
+│ memory-     │     embeddings      │   :8766 (local)  │
+│ lancedb     │ ◀── 384-dim vec ─── │  MiniLM in-proc  │
+└─────────────┘                    └──────────────────┘
+        ▲                                      │
+        │ 0 OpenAI calls                       │ 0 cost
+        └──────────────────────────────────────┘
 ```
 
-- **Jebat-Cortex** = the agent's own memory (what was said, what was learned).
-- **Graphify** (Graphify-Labs/graphify, Apache-2.0) = the *repo brain* — a
-  local, queryable knowledge graph of the codebase, so delegated coding agents
-  (Lekiu) get structured repo context instead of coding blind.
+---
 
-Graphify is **not** a replacement for Jebat-Cortex; it is a complementary
-structural-knowledge layer. Graphify is strong at repo/document structure, not
-full conversational memory.
+## ✨ Why
 
-## Repository layout
+OpenClaw's `memory-lancedb` plugin needs an embeddings backend. Out of the box it
+points at OpenAI → you hit `429` the moment your free quota dies and your agent
+goes amnesiac mid-conversation.
 
-```
-core/        memory_curator.py, vector_store.py, graph_store.py, context_builder.py,
-             rules.py, ingest_hermes.py
-config/      cortex_rules.json
-tests/       unit + fixture based
-data/        sample conversation logs + generated stores (gitignored)
-run_cortex.sh
-```
+Tuah-Cortex **is** the backend. Same OpenAI-compatible request/response shape,
+served from a model that's already loaded in-process. One config block and the
+429 is gone for good.
 
-## Quick start
+**Verified in production:** a live Telegram group message → Tuah auto-captures →
+embeds via Tuah-Cortex → vector stored in LanceDB (`vecDim: 384`) → **0 OpenAI
+429**.
+
+---
+
+## 🚀 Quick start
 
 ```bash
-# 1. Ingest the real Hermes corpus (read-only against ~/.hermes/state.db)
-bash run_cortex.sh --from-hermes "what embedding backend does Jebat-Cortex use?"
+# 1. Clone
+git clone https://github.com/papadiyer/tuah-cortex.git
+cd tuah-cortex
 
-# 2. Or ingest a sample conversation log
-bash run_cortex.sh sample_conversation.jsonl "your question here"
+# 2. Create venv + install (CPU torch + sentence-transformers)
+python3.11 -m venv .venv-cortex-st
+. .venv-cortex-st/bin/activate
+pip install "sentence-transformers==5.7.0" torch
 
-# 3. Run the test suite
-python3 -m unittest discover -s tests
+# 3. Run the API (binds 127.0.0.1:8766 only)
+python -m cli.cortex_cli serve --host 127.0.0.1 --port 8766
+
+# 4. Prove it works
+curl -s http://127.0.0.1:8766/v1/health
+curl -s -X POST http://127.0.0.1:8766/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"x","input":"tuah ingat semua"}'
+# → {"data":[{"embedding":[384 floats],"index":0}], ...}
 ```
 
-Constraints (see `config/cortex_rules.json`):
-- `user_char_limit` = 1375, `memory_char_limit` = 2200.
-- `~/.hermes/state.db` is opened **read-only** — never written.
-- No secrets, no credentials, no `.env` edits.
-
-## Graphify repo-brain layer (local install)
-
-Graphify is installed in an **isolated venv** (per directive — no blind install,
-system Python 3.9.6 is too old; graphifyy needs >=3.10).
+### 🍏 macOS launchd (reboot-safe)
 
 ```bash
-# One-time setup (already done on this host)
-python3.11 -m venv .venv-graphify
-. .venv-graphify/bin/activate
-pip install graphifyy          # note the double-y package name
-ln -s "$(pwd)/.venv-graphify/bin/graphify" "$HOME/.hermes/bin/graphify"
+cp service/launchd/com.m5.tuah-cortex.plist ~/Library/LaunchAgents/
+cp service/launchd/com.m5.tuah-cortex-worker.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.m5.tuah-cortex.plist
+launchctl load ~/Library/LaunchAgents/com.m5.tuah-cortex-worker.plist
+curl -s http://127.0.0.1:8766/v1/health   # → ready
 ```
 
-Build + query a repo graph (code-only, **no LLM key required**):
+> The worker drains the ingestion queue. Load **both** plists or events pile up
+> and nothing ever gets embedded.
 
-```bash
-graphify extract "$PWD" --code-only --no-viz   # -> graphify-out/graph.json
-graphify query "how does the vector store rank results?"
+---
+
+## 🔌 Wire it to OpenClaw (memory-lancedb)
+
+In your OpenClaw config (`m5/config/openclaw.m5.json`):
+
+```jsonc
+{
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "memory-lancedb": {
+        "enabled": true,                       // BOTH flags required
+        "config": {
+          "embedding": {
+            "provider": "openai",               // OpenAI-COMPATIBLE shape, NOT api.openai.com
+            "model": "sentence-transformers-paraphrase-multilingual-MiniLM-L12-v2",
+            "baseUrl": "http://127.0.0.1:8766/v1",
+            "apiKey": "***",                    // placeholder, not validated
+            "dimensions": 384
+          },
+          "autoCapture": true,
+          "autoRecall": true,
+          "customTriggers": ["tuah", "jebat", "cortex", "m5", "ingat"]
+        }
+      }
+    },
+    "slots": { "memory": "memory-lancedb" }     // replaces builtin memory-core
+  }
+}
 ```
 
-`graphify_context.sh` (in the `delegate_coding_to_lekiu` skill) wraps this and
-is already wired into `lekiu-task`, so Lekiu receives structured codebase
-context automatically. If Graphify is absent, it falls back to ripgrep/git.
+- `plugins.enabled` **and** `entries.memory-lancedb.enabled` must both be `true`
+  or the engine shows as "disabled" in the UI and memory never runs.
+- `slots.memory = "memory-lancedb"` swaps out the builtin `memory-core` (the thing
+  that was 429-ing on OpenAI).
+- `customTriggers` makes group chat actually capture. Casual messages without a
+  trigger word are skipped by design (keeps noise out of memory).
 
-> Generated artifacts `graphify-out/` and `.venv-graphify/` are gitignored.
+Restart the gateway. Done — your agent now remembers locally.
 
-## Verification status
+---
 
-- 112 unit tests green.
-- Real `--from-hermes` run proves `~/.hermes/state.db` is never mutated.
-- Graphify extract/query verified locally (389 nodes / 855 edges on this repo).
+## 🏗️ Architecture
 
-## Version history
+```
+Chat → Conversation → Memory Curator → (split)
+  ├─ Experience  → Graph Store   (relational / code graph; ripgrep fallback)
+  └─ Knowledge   → Vector Store  (semantic long-term memory, 384-dim MiniLM)
+Both merge at Context Builder → injected into the agent's system prompt.
+```
 
-- **v0.1** — prefrontal memory pipeline scaffold (54 tests).
-- **v0.2** — real Hermes corpus ingestion + pluggable embedder (97 tests).
-- **v0.3** — review hardening: tool/thinking payload filtering + full embedding
-  identity enforcement (backend + model + dimension) with loud retrieval
-  failure on mismatch (112 tests). Plus the Graphify repo-brain layer.
+Plus the Tuah fork addition:
 
-Roles: Jebat/Hermes = Architect & Memory Curator; Lekiu (Claude Code) = Builder;
-Faisal = final approval authority.
+```
+api/embeddings.py  →  POST /v1/embeddings
+   reuses the in-process SentenceTransformerEmbedder (no extra model load)
+   OpenAI-compatible request/response shape
+```
+
+| Layer | Tech |
+|---|---|
+| Embeddings | `sentence-transformers` paraphrase-multilingual-MiniLM-L12-v2 (384-dim) |
+| Vector store | LanceDB (via OpenClaw `memory-lancedb`) |
+| API | stdlib `http.server`, localhost-only, no external deps |
+| Memory pipeline | vector + graph + context builder (inherited from Jebat-Cortex) |
+
+---
+
+## 📁 Layout
+
+```
+api/          OpenAI-compatible HTTP surface (/v1/embeddings, /v1/health, ...)
+core/         memory_curator, vector_store, graph_store, context_builder, rules
+config/       cortex_rules.json, identity.json
+service/      launchd plists (macOS)
+tests/        unit + fixture based
+run_cortex.sh entrypoint
+data/         sample logs + generated stores (gitignored)
+```
+
+---
+
+## ✅ Status
+
+- [x] `/v1/embeddings` returns 384-dim vectors, OpenAI shape
+- [x] Wired to OpenClaw `memory-lancedb` → live memory persisted (LanceDB)
+- [x] **0 OpenAI 429** in production gateway log
+- [x] launchd plists for reboot-safe localhost serving
+- [x] Test suite green (`python3 -m unittest discover -s tests`)
+
+---
+
+## 📜 License
+
+[MIT](LICENSE) — do whatever, just keep the copyright notice.
+
+---
+
+<p align="center">
+  <sub>Built for Tuah · runs on your laptop · no cloud required</sub>
+</p>
